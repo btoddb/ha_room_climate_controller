@@ -1,5 +1,5 @@
 {
-    "name": "btoddb/room-climate-controller",
+    "name": "btoddb/ha_room_climate_controller",
     "image": "mcr.microsoft.com/devcontainers/base:debian",
     "postCreateCommand": {
         "setup": "scripts/setup && npm --prefix custom_components/btoddb_room_climate_controller/card install",
@@ -46,7 +46,7 @@
             "version": "lts"
         },
         "ghcr.io/devcontainers/features/python:1": {
-            // minimum for room-climate-controller is 3.14
+            // minimum for ha_room_climate_controller is 3.14
             "version": "3.14"
         },
         "ghcr.io/devcontainers-extra/features/apt-packages:1": {
