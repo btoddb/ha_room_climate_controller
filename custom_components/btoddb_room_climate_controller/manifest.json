@@ -10,10 +10,10 @@
     "http",
     "lovelace"
   ],
-  "documentation": "https://github.com/btoddb/room-climate-controller",
+  "documentation": "https://github.com/btoddb/ha_room_climate_controller",
   "integration_type": "hub",
   "iot_class": "local_push",
-  "issue_tracker": "https://github.com/btoddb/room-climate-controller/issues",
+  "issue_tracker": "https://github.com/btoddb/ha_room_climate_controller/issues",
   "loggers": [
     "custom_components.btoddb_room_climate_controller"
   ],
