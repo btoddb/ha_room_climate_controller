@@ -37,9 +37,13 @@ engine = _load("engine")
 from rc_pure.engine import (  # noqa: E402
     ClimateInfo,
     EngineInputs,
+    FanControl,
     FanInfo,
+    FanSetDirection,
     FanSetPercentage,
     FanSetPreset,
+    FanTurnOff,
+    FanTurnOn,
     SetFanMode,
     SetHvacMode,
     SetTemperature,
@@ -61,14 +65,13 @@ def _base(**kw):
         room_temp=72.0,
         ac=None,
         heater=None,
-        fan=None,
         ac_fan=None,
         heater_fan=None,
+        fans=(),
         ac_power=None,
         heater_power=None,
         use_ac=False,
         use_heater=False,
-        use_fan=False,
         ac_fan_only_override=False,
         heater_fan_only_override=False,
         target_cooling=72.0,
@@ -77,14 +80,47 @@ def _base(**kw):
         target_heating=68.0,
         heating_medium=65.0,
         heating_high=62.0,
-        target_fan=72.0,
-        fan_medium=75.0,
-        fan_high=78.0,
         command_delay_ms=2000,
         power_on_delay_ms=3000,
     )
     defaults.update(kw)
     return EngineInputs(**defaults)
+
+
+def _fan_control(
+    entity_id="fan.tower",
+    *,
+    use=True,
+    is_on=False,
+    target=72.0,
+    medium=75.0,
+    high=78.0,
+    reverse=False,
+    preset_modes=(),
+    percentage=0,
+    preset_mode=None,
+    percentage_step=1.0,
+    reversible=False,
+    direction=None,
+):
+    """Build a FanControl for a single standalone fan (see FanInfo field order)."""
+    return FanControl(
+        info=FanInfo(
+            entity_id,
+            is_on,
+            preset_mode,
+            percentage,
+            tuple(preset_modes),
+            percentage_step,
+            reversible,
+            direction,
+        ),
+        use=use,
+        target=target,
+        medium=medium,
+        high=high,
+        reverse=reverse,
+    )
 
 
 def _climate(
@@ -211,9 +247,10 @@ def test_idle_room_with_off_switch_and_fans_emits_nothing():
             ac=_climate(hvac="off", fan_modes=("low", "high")),
             ac_power=SwitchInfo("switch.ac_power", is_on=False),
             ac_fan=off_fan("fan.ac"),
-            fan=off_fan("fan.ceiling"),
+            fans=(
+                _fan_control("fan.ceiling", use=False, preset_modes=("low", "high")),
+            ),
             use_ac=False,
-            use_fan=False,
             room_temp=73.0,
         )
     )
@@ -275,14 +312,7 @@ def test_combined_heat_pump_heats():
 def test_standalone_fan_medium():
     cmds = compute_commands(
         _base(
-            fan=FanInfo(
-                "fan.tower",
-                is_on=False,
-                preset_mode=None,
-                percentage=0,
-                preset_modes=("low", "medium", "high"),
-            ),
-            use_fan=True,
+            fans=(_fan_control("fan.tower", preset_modes=("low", "medium", "high")),),
             room_temp=76.0,
         )
     )
@@ -300,17 +330,15 @@ def test_sub_degree_change_crosses_no_threshold_emits_nothing():
     """
     cmds = compute_commands(
         _base(
-            fan=FanInfo(
-                "fan.tower",
-                is_on=True,
-                preset_mode="medium",
-                percentage=50,
-                preset_modes=("low", "medium", "high"),
+            fans=(
+                _fan_control(
+                    "fan.tower",
+                    is_on=True,
+                    preset_mode="medium",
+                    percentage=50,
+                    preset_modes=("low", "medium", "high"),
+                ),
             ),
-            use_fan=True,
-            target_fan=72.0,
-            fan_medium=75.0,
-            fan_high=78.0,
             room_temp=76.9,  # int(76.9) == 76: still medium tier, still > 72+0.2
         )
     )
@@ -321,17 +349,15 @@ def test_whole_degree_change_crosses_medium_threshold():
     """Crossing from low into medium (CC-5) re-commands the fan's speed."""
     cmds = compute_commands(
         _base(
-            fan=FanInfo(
-                "fan.tower",
-                is_on=True,
-                preset_mode="low",
-                percentage=10,
-                preset_modes=("low", "medium", "high"),
+            fans=(
+                _fan_control(
+                    "fan.tower",
+                    is_on=True,
+                    preset_mode="low",
+                    percentage=10,
+                    preset_modes=("low", "medium", "high"),
+                ),
             ),
-            use_fan=True,
-            target_fan=72.0,
-            fan_medium=75.0,
-            fan_high=78.0,
             room_temp=75.0,  # int(75) == 75: crosses into medium (>= 75)
         )
     )
@@ -343,17 +369,15 @@ def test_whole_degree_change_crosses_high_threshold():
     """Crossing from medium into high (CC-5) re-commands the fan's speed."""
     cmds = compute_commands(
         _base(
-            fan=FanInfo(
-                "fan.tower",
-                is_on=True,
-                preset_mode="medium",
-                percentage=50,
-                preset_modes=("low", "medium", "high"),
+            fans=(
+                _fan_control(
+                    "fan.tower",
+                    is_on=True,
+                    preset_mode="medium",
+                    percentage=50,
+                    preset_modes=("low", "medium", "high"),
+                ),
             ),
-            use_fan=True,
-            target_fan=72.0,
-            fan_medium=75.0,
-            fan_high=78.0,
             room_temp=78.0,  # int(78) == 78: crosses into high (>= 78)
         )
     )
@@ -390,15 +414,14 @@ def test_standalone_fan_stepped_speed_grid_no_churn():
     """
     cmds = compute_commands(
         _base(
-            fan=FanInfo(
-                "fan.air_circulator",
-                is_on=True,
-                preset_mode=None,
-                percentage=11,
-                preset_modes=(),
-                percentage_step=11.111111111111111,
+            fans=(
+                _fan_control(
+                    "fan.air_circulator",
+                    is_on=True,
+                    percentage=11,
+                    percentage_step=11.111111111111111,
+                ),
             ),
-            use_fan=True,
             room_temp=74.0,
         )
     )
@@ -429,15 +452,14 @@ def test_standalone_fan_stepped_speed_grid_still_commands_from_off():
     """CC-6: a stepped fan reporting 0% still gets commanded to the raw tier."""
     cmds = compute_commands(
         _base(
-            fan=FanInfo(
-                "fan.air_circulator",
-                is_on=True,
-                preset_mode=None,
-                percentage=0,
-                preset_modes=(),
-                percentage_step=11.111111111111111,
+            fans=(
+                _fan_control(
+                    "fan.air_circulator",
+                    is_on=True,
+                    percentage=0,
+                    percentage_step=11.111111111111111,
+                ),
             ),
-            use_fan=True,
             room_temp=74.0,
         )
     )
@@ -448,15 +470,14 @@ def test_standalone_fan_stepped_speed_grid_tier_change_still_commands():
     """CC-6: a stepped fan on the ``low`` grid step still commands a tier change."""
     cmds = compute_commands(
         _base(
-            fan=FanInfo(
-                "fan.air_circulator",
-                is_on=True,
-                preset_mode=None,
-                percentage=11,
-                preset_modes=(),
-                percentage_step=11.111111111111111,
+            fans=(
+                _fan_control(
+                    "fan.air_circulator",
+                    is_on=True,
+                    percentage=11,
+                    percentage_step=11.111111111111111,
+                ),
             ),
-            use_fan=True,
             room_temp=79.0,
         )
     )
@@ -888,7 +909,7 @@ def test_standalone_fan_hysteresis():
     """CC-27: a running standalone fan holds until within 0.2° of target."""
 
     def fan(is_on):
-        return FanInfo(
+        return _fan_control(
             "fan.tower",
             is_on=is_on,
             preset_mode="low" if is_on else None,
@@ -897,25 +918,19 @@ def test_standalone_fan_hysteresis():
         )
 
     # Running, room 72.5, target 72 -> 72.5 > 72.2, stays on (no turn-off).
-    cmds = compute_commands(_base(fan=fan(is_on=True), use_fan=True, room_temp=72.5))
+    cmds = compute_commands(_base(fans=(fan(is_on=True),), room_temp=72.5))
     assert not any(type(c).__name__ == "FanTurnOff" for c in cmds)
 
     # Running, room 72.1 -> within 0.2° of target, fan turns off.
-    cmds_off = compute_commands(
-        _base(fan=fan(is_on=True), use_fan=True, room_temp=72.1)
-    )
+    cmds_off = compute_commands(_base(fans=(fan(is_on=True),), room_temp=72.1))
     assert any(type(c).__name__ == "FanTurnOff" for c in cmds_off)
 
     # Off, room 72.5 -> below the 73.0 restart threshold, stays off.
-    cmds_idle = compute_commands(
-        _base(fan=fan(is_on=False), use_fan=True, room_temp=72.5)
-    )
+    cmds_idle = compute_commands(_base(fans=(fan(is_on=False),), room_temp=72.5))
     assert not any(type(c).__name__ == "FanTurnOn" for c in cmds_idle)
 
     # Off, room 73.0 (target + 1°) -> fan restarts.
-    cmds_on = compute_commands(
-        _base(fan=fan(is_on=False), use_fan=True, room_temp=73.0)
-    )
+    cmds_on = compute_commands(_base(fans=(fan(is_on=False),), room_temp=73.0))
     assert any(type(c).__name__ == "FanTurnOn" for c in cmds_on)
 
 
@@ -1065,14 +1080,9 @@ def test_window_open_standalone_fan_unaffected():
     def _run(*, window_open):
         return compute_commands(
             _base(
-                fan=FanInfo(
-                    "fan.tower",
-                    is_on=False,
-                    preset_mode=None,
-                    percentage=0,
-                    preset_modes=("low", "medium", "high"),
+                fans=(
+                    _fan_control("fan.tower", preset_modes=("low", "medium", "high")),
                 ),
-                use_fan=True,
                 room_temp=80.0,
                 window_open=window_open,
             )
@@ -1158,3 +1168,163 @@ def test_window_failsafe_bad_states_are_closed():
     assert any_window_open(("unavailable", "unknown")) is False
     # A good "on" still wins even when another sensor is unavailable.
     assert any_window_open(("unavailable", "on")) is True
+
+
+# --- multiple standalone fans per room (CC-13 / CC-14) ----------------------
+def test_two_fans_different_targets_only_one_runs():
+    """
+    CC-13: two fans with distinct targets — only the one past its threshold runs.
+
+    room_temp=74 is a full degree past fan A's target (72) so it starts, but
+    below fan B's restart threshold (target 76 -> restarts at 77), so B stays off.
+    Commands must address the correct distinct entity_ids.
+    """
+    cmds = compute_commands(
+        _base(
+            fans=(
+                _fan_control(
+                    "fan.a",
+                    target=72.0,
+                    medium=75.0,
+                    high=78.0,
+                    preset_modes=("low", "medium", "high"),
+                ),
+                _fan_control(
+                    "fan.b",
+                    target=76.0,
+                    medium=79.0,
+                    high=82.0,
+                    preset_modes=("low", "medium", "high"),
+                ),
+            ),
+            room_temp=74.0,
+        )
+    )
+    on = [c for c in cmds if isinstance(c, FanTurnOn)]
+    assert [c.entity_id for c in on] == ["fan.a"]
+    # cooling_speed(74, 75, 78) -> "low" for fan.a
+    presets = [c for c in cmds if isinstance(c, FanSetPreset)]
+    assert [(c.entity_id, c.preset_mode) for c in presets] == [("fan.a", "low")]
+    assert not any(
+        isinstance(c, (FanTurnOn, FanSetPreset, FanSetPercentage))
+        and c.entity_id == "fan.b"
+        for c in cmds
+    )
+
+
+def test_shared_offsets_per_fan_yield_different_speed_tiers():
+    """
+    CC-14: shared offsets per fan give different tiers at the same room_temp.
+
+    Different absolute thresholds come from a shared offset over distinct targets.
+    Both fans share medium/high offsets of +3/+6, but different targets shift the
+    thresholds. At room_temp=79 (both already running): fan A (target 72 ->
+    medium 75 / high 78) is High; fan B (target 76 -> medium 79 / high 82) is
+    Medium.
+    """
+    cmds = compute_commands(
+        _base(
+            fans=(
+                _fan_control(
+                    "fan.a",
+                    is_on=True,
+                    percentage=10,
+                    target=72.0,
+                    medium=75.0,
+                    high=78.0,
+                    preset_modes=("low", "medium", "high"),
+                ),
+                _fan_control(
+                    "fan.b",
+                    is_on=True,
+                    percentage=10,
+                    target=76.0,
+                    medium=79.0,
+                    high=82.0,
+                    preset_modes=("low", "medium", "high"),
+                ),
+            ),
+            room_temp=79.0,
+        )
+    )
+    presets = {c.entity_id: c.preset_mode for c in cmds if isinstance(c, FanSetPreset)}
+    assert presets == {"fan.a": "high", "fan.b": "medium"}
+
+
+def test_per_fan_reverse_each_gets_its_own_direction():
+    """
+    CC-22: two reversible running fans each get their own direction command.
+
+    One reverse=True, one reverse=False — each gets its own FanSetDirection with
+    its own requested direction, and a fan already at the requested one gets none.
+    """
+    cmds = compute_commands(
+        _base(
+            fans=(
+                # Wants reverse, currently forward -> emits reverse.
+                _fan_control(
+                    "fan.rev",
+                    is_on=True,
+                    percentage=10,
+                    reverse=True,
+                    reversible=True,
+                    direction="forward",
+                    preset_modes=("low", "medium", "high"),
+                    preset_mode="low",
+                ),
+                # Wants forward, already forward -> emits nothing for direction.
+                _fan_control(
+                    "fan.fwd",
+                    is_on=True,
+                    percentage=10,
+                    reverse=False,
+                    reversible=True,
+                    direction="forward",
+                    preset_modes=("low", "medium", "high"),
+                    preset_mode="low",
+                ),
+            ),
+            room_temp=74.0,
+        )
+    )
+    dirs = [c for c in cmds if isinstance(c, FanSetDirection)]
+    assert [(c.entity_id, c.direction) for c in dirs] == [("fan.rev", "reverse")]
+
+
+def test_fans_are_independent_turning_one_use_off():
+    """CC-13: turning one fan's Use off turns only that fan off; the other runs."""
+    cmds = compute_commands(
+        _base(
+            fans=(
+                # Use off but currently on -> turned off.
+                _fan_control(
+                    "fan.off",
+                    use=False,
+                    is_on=True,
+                    percentage=50,
+                    preset_mode="medium",
+                    preset_modes=("low", "medium", "high"),
+                ),
+                # Use on and past threshold -> keeps running / commanded.
+                _fan_control(
+                    "fan.on",
+                    use=True,
+                    is_on=True,
+                    percentage=10,
+                    preset_mode="low",
+                    preset_modes=("low", "medium", "high"),
+                ),
+            ),
+            room_temp=76.0,
+        )
+    )
+    offs = [c for c in cmds if isinstance(c, FanTurnOff)]
+    assert [c.entity_id for c in offs] == ["fan.off"]
+    # fan.on stays running; cooling_speed(76, 75, 78) -> "medium".
+    presets = [c for c in cmds if isinstance(c, FanSetPreset)]
+    assert [(c.entity_id, c.preset_mode) for c in presets] == [("fan.on", "medium")]
+    assert not any(
+        isinstance(c, (FanTurnOn, FanSetPreset, FanSetPercentage))
+        and c.entity_id == "fan.off"
+        for c in cmds
+    )

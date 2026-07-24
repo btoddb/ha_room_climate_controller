@@ -49,6 +49,13 @@ class RoomClimateHub:
         """Load profiles from storage and build rooms from subentries."""
         self.profiles = await self.store.async_load()
         self.rebuild_rooms()
+        changed = False
+        for profile in self.profiles:
+            room = self.room_by_key(profile.room)
+            if room is not None and profile.migrate_fan_presets(room):
+                changed = True
+        if changed:
+            await self.async_save()
 
     def rebuild_rooms(self) -> None:
         """(Re)build the room map from the entry's room subentries."""

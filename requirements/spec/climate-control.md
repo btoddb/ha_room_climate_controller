@@ -24,13 +24,16 @@ while any is open (CC-20).
 ## Per-room controls (entities)
 
 For each device the room has, the integration creates live entities the engine
-reads and the card/profiles write:
+reads and the card/profiles write. A room may have **multiple standalone fans**
+(`fan_entities`, a list); each fan's live entities are keyed by a **slug of the
+fan's source entity id**, so per-fan keys take the form `…__<slug>`.
 
-- **Target temp** — `number.*` (`target_cooling_temp` / `target_heating_temp` / `target_fan_temp`).
-- **Medium offset** and **High offset** — `number.*`, range **1–20 °F** (`OFFSET_MIN`/`OFFSET_MAX`). They define the fan-speed thresholds (CC-7).
-- **Use** toggle — `switch.*` (`use_ac` / `use_heater` / `use_fan`).
+- **Target temp** — `number.*` (`target_cooling_temp` / `target_heating_temp`; per fan, `target_fan_temp__<slug>`).
+- **Medium offset** and **High offset** — `number.*`, range **1–20 °F** (`OFFSET_MIN`/`OFFSET_MAX`). They define the fan-speed thresholds (CC-7). A room's fans **share a single** Medium/High offset pair (`fan_medium_offset` / `fan_high_offset`), not one pair per fan.
+- **Use** toggle — `switch.*` (`use_ac` / `use_heater`; per fan, `use_fan__<slug>`).
 - **Manual mode** — one `switch.*` per room (`manual_mode`).
 - **Fan-only override** — `switch.*` per applicable device (see CC-12).
+- **Fan reverse** — `switch.*` per fan (`fan_reverse__<slug>`; see CC-22).
 
 ## Temperature comparison
 
@@ -76,30 +79,44 @@ Speed is a 3-tier function of how far the room is past the target:
   - **Use on, but not actively heating/cooling** → fan-only.
   - **Use off** → fan-only **only if** the room has no standalone fan, *or* its standalone fan's Use toggle is on; otherwise off.
   - Heaters additionally run fan-only **natively** whenever Use heater is on and they're not actively heating (no override needed).
+  - **Multi-fan generalization:** "the room has a standalone fan" means whether **any** fan is configured, and "its standalone fan's Use toggle is on" means whether **any** fan's Use is on (the aggregate `use_fan = any(fan.use)`) — this preserves the single-fan behavior.
 
 ## Standalone fan control
 
-- **CC-13** The fan runs when **Use fan** on **and** the room is past the fan threshold (CC-27 cooling-style hysteresis against target_fan); otherwise it's turned off.
-- **CC-14** While on, speed follows the cooling-style tiers (CC-7) against `target_fan` + fan offsets, mapped to 10/50/100% or the fan's preset modes.
+A room may have a **list** of standalone fans (`fan_entities`, replacing the old
+single `fan_entity`). Each fan has its **own** target temp, its **own** Use toggle,
+and its **own** Fan reverse switch, but all of a room's fans **share** the room's
+fan Medium/High **offsets** and the fan min/max **limits**. Fans are
+**independent** — one may run while another is off.
+
+Cooling and heating remain **single-device** this round (out of scope). For
+backward compatibility, a pre-existing single-fan room (config key `fan_entity`
+and un-slugged `target_fan_temp` / `use_fan` / `fan_reverse` entities) is
+**migrated** to the list form — its legacy entities are renamed to the slugged
+per-fan keys.
+
+- **CC-13** Each fan runs when **its own Use fan** toggle is on **and** the room is past **that fan's** threshold (CC-27 cooling-style hysteresis against that fan's `target_fan`); otherwise that fan is turned off. Every fan is evaluated independently against its own target and its own Use.
+- **CC-14** While on, a fan's speed follows the cooling-style tiers (CC-7) against **its own** `target_fan` plus the room's **shared** fan offsets, mapped to 10/50/100% or the fan's preset modes. Because the offsets are shared, each fan's Medium/High thresholds are its own target plus the common offsets.
 
 ## Standalone fan direction
 
 A reversible ceiling fan can spin **forward** or **reverse**. Reversibility is
-**auto-detected** live from the fan entity — there is no config-flow toggle.
-Detection checks two signals: the standard HA DIRECTION capability bit
-(`supported_features & FanEntityFeature.DIRECTION`), **or** the presence of a
-`"reverse"` entry in the entity's `preset_modes` list (used by integrations such
-as Dreo that express direction as a preset rather than a native direction feature).
-Each room with a standalone fan gets a **Fan reverse** `switch.*` entity; it is
-created unconditionally (detection at platform setup would race fan integrations
-that load later) and is simply inert for non-reversible fans. Direction control
-applies to the **standalone fan only** — the A/C/heater companion fans are
-excluded by design.
+**auto-detected** live, **per fan**, from each fan entity — there is no
+config-flow toggle. Detection checks two signals: the standard HA DIRECTION
+capability bit (`supported_features & FanEntityFeature.DIRECTION`), **or** the
+presence of a `"reverse"` entry in the entity's `preset_modes` list (used by
+integrations such as Dreo that express direction as a preset rather than a native
+direction feature). **Each** standalone fan gets its **own** **Fan reverse**
+`switch.*` entity (`fan_reverse__<slug>`); it is created unconditionally
+(detection at platform setup would race fan integrations that load later) and is
+simply inert for that fan when it is non-reversible. Direction control applies to
+the **standalone fans only** — the A/C/heater companion fans are excluded by
+design.
 
-- **CC-22** When the standalone fan is **reversible and running**, and its reported direction differs from the requested one (Fan reverse switch on → `reverse`, off → `forward`), the engine emits a set-direction command. For fans with native DIRECTION support the controller calls `fan.set_direction`; for fans that use a `"reverse"` preset the controller calls `fan.set_preset_mode("reverse")` to engage and `fan.set_preset_mode(<forward-preset>)` to disengage (the forward preset is the first non-`"reverse"` entry in the entity's `preset_modes`).
-- **CC-23** Idempotence (CC-19 extension): the direction command is **suppressed when the reported direction already matches** the request. An unknown (`None`) reported direction never matches, so it emits.
-- **CC-24** A **non-reversible** fan never receives a direction command, even when the Fan reverse switch is on.
-- **CC-25** Direction is applied **only while the fan is actively running**: when the fan must start and reverse in the same evaluation, turn-on precedes set-direction; a reverse request while the fan is off emits nothing and takes effect at the next turn-on.
+- **CC-22** When a standalone fan is **reversible and running**, and its reported direction differs from the requested one (**that fan's** Fan reverse switch on → `reverse`, off → `forward`), the engine emits a set-direction command for that fan. For fans with native DIRECTION support the controller calls `fan.set_direction`; for fans that use a `"reverse"` preset the controller calls `fan.set_preset_mode("reverse")` to engage and `fan.set_preset_mode(<forward-preset>)` to disengage (the forward preset is the first non-`"reverse"` entry in the entity's `preset_modes`).
+- **CC-23** Idempotence (CC-19 extension): a fan's direction command is **suppressed when the reported direction already matches** the request. An unknown (`None`) reported direction never matches, so it emits.
+- **CC-24** A **non-reversible** fan never receives a direction command, even when its Fan reverse switch is on.
+- **CC-25** Direction is applied **only while that fan is actively running**: when a fan must start and reverse in the same evaluation, turn-on precedes set-direction; a reverse request while the fan is off emits nothing and takes effect at that fan's next turn-on.
 
 ## Manual mode
 

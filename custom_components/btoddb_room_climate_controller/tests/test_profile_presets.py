@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from custom_components.btoddb_room_climate_controller.models import DevicePreset, Profile
+from custom_components.btoddb_room_climate_controller.models import (
+    DevicePreset,
+    Profile,
+)
 
 
 def _profile(**presets: DevicePreset) -> Profile:

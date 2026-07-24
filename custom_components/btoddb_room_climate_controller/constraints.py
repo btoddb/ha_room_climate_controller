@@ -28,7 +28,7 @@ from .const import (
     OFFSET_MAX,
     OFFSET_MIN,
 )
-from .models import Room, room_uid
+from .models import Room, fan_slug, fan_target_key, room_uid
 
 if TYPE_CHECKING:
     from .hub import RoomClimateConfigEntry
@@ -88,12 +88,21 @@ class ConstraintsValidator:
     def _tracked_ids(self) -> frozenset[str]:
         ids: set[str] = set()
         for device in self.room.devices:
+            if device == DEVICE_FAN:
+                continue
             for key in (
                 KEY_TARGET[device],
                 KEY_MEDIUM_OFFSET[device],
                 KEY_HIGH_OFFSET[device],
             ):
                 if eid := self._resolve(key, "number"):
+                    ids.add(eid)
+        if self.room.has_fan:
+            for key in (KEY_MEDIUM_OFFSET["fan"], KEY_HIGH_OFFSET["fan"]):
+                if eid := self._resolve(key, "number"):
+                    ids.add(eid)
+            for fan_eid in self.room.fan_entities:
+                if eid := self._resolve(fan_target_key(fan_slug(fan_eid)), "number"):
                     ids.add(eid)
         return frozenset(ids)
 
@@ -178,14 +187,21 @@ class ConstraintsValidator:
         )
 
     async def _fan_bounds(self) -> None:
-        target = self._num(KEY_TARGET[DEVICE_FAN])
+        targets = [
+            t
+            for eid in self.room.fan_entities
+            if (t := self._num(fan_target_key(fan_slug(eid)))) is not None
+        ]
         high = self._num(KEY_HIGH_OFFSET[DEVICE_FAN])
         ceiling = self.room.limits[DEVICE_FAN]["max"]
-        if target is None or high is None or target + high <= ceiling:
+        if not targets or high is None:
+            return
+        worst = max(targets)
+        if worst + high <= ceiling:
             return
         await self._clamp(
             KEY_HIGH_OFFSET[DEVICE_FAN],
-            self._bounded(ceiling - target),
+            self._bounded(ceiling - worst),
             "Fan high offset would exceed the fan maximum",
         )
 

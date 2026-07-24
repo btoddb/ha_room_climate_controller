@@ -17,6 +17,19 @@ export interface RoomClimateUserConfig extends LovelaceCardConfig {
 
 /** Fully-resolved config the card renders from: the user's presentation fields
 plus every entity discovered from the integration for the chosen room. */
+/** One fan in a room. Each fan owns its Use switch, Target number and Reverse
+switch; `reversible` (detected per fan, CC-22) gates its Reverse control. The
+medium/high offsets are shared across the room's fans, not stored here. */
+export interface FanConfig {
+  entity_id: string;
+  slug: string;
+  label: string;
+  reversible: boolean;
+  use: string;
+  target: string;
+  reverse: string;
+}
+
 export interface RoomClimateControlConfig extends LovelaceCardConfig {
   type: "custom:room-climate-control";
   /** Integration room key (new model: the card self-discovers entities). */
@@ -27,18 +40,15 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   power_sensor?: string;
   ac_entity?: string;
   heater_entity?: string;
-  fan_entity?: string;
   /** Optional window contacts; while any reads "on" (open) the engine suppresses
   cooling/heating and the card disables their Use toggles (UX-26). */
   window_sensors?: string[];
   use_ac: string;
   use_heater: string;
-  use_fan: string;
   ac_fan_only_override?: string;
   heater_fan_only_override?: string;
-  /** True when the standalone fan supports direction; gates the Reverse toggle (UX-28). */
-  fan_reversible?: boolean;
-  fan_reverse_toggle?: string;
+  /** The room's fans (each with its own use/target/reverse + reversible flag). */
+  fans: FanConfig[];
   manual_mode: string;
   target_cooling: string;
   cooling_medium_offset: string;
@@ -46,7 +56,7 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   target_heating: string;
   heating_medium_offset: string;
   heating_high_offset: string;
-  target_fan: string;
+  /** Shared medium/high fan-speed offsets for all the room's fans. */
   fan_medium_offset: string;
   fan_high_offset: string;
   outdoor_sensor?: string;
@@ -71,7 +81,7 @@ export function defaultConfig(
     temp_sensor: "",
     use_ac: "",
     use_heater: "",
-    use_fan: "",
+    fans: [],
     manual_mode: "",
     target_cooling: "",
     cooling_medium_offset: "",
@@ -79,7 +89,6 @@ export function defaultConfig(
     target_heating: "",
     heating_medium_offset: "",
     heating_high_offset: "",
-    target_fan: "",
     fan_medium_offset: "",
     fan_high_offset: "",
     outdoor_sensor: DEFAULT_OUTDOOR_SENSOR,

@@ -39,6 +39,8 @@ from rc_controller.controller import (  # noqa: E402
 )
 from rc_controller.engine import (  # noqa: E402
     EngineInputs,
+    FanControl,
+    FanInfo,
     FanSetDirection,
     FanSetPercentage,
     FanSetPreset,
@@ -65,7 +67,7 @@ def _room(**overrides):
         "combined": False,
         "ac_climate": "climate.office_ac",
         "heater_climate": None,
-        "fan_entity": "fan.office",
+        "fan_entities": ("fan.office",),
         "ac_fan_entity": "fan.office_ac_fan",
         "heater_fan_entity": None,
         "ac_power_switch": "switch.office_ac_power",
@@ -95,11 +97,11 @@ def test_describe_command_maps_each_command_to_a_phrase():
         (TurnOffClimate("climate.office_ac"), "A/C off"),
         (SetTemperature("climate.office_ac", 65, "cool"), "A/C setpoint → 65°F"),
         (SetFanMode("climate.office_ac", "high"), "A/C fan speed → high"),
-        (FanTurnOn("fan.office"), "Fan on"),
-        (FanTurnOff("fan.office"), "Fan off"),
+        (FanTurnOn("fan.office"), "Fan office on"),
+        (FanTurnOff("fan.office"), "Fan office off"),
         (FanSetPreset("fan.office_ac_fan", "medium"), "A/C fan speed → medium"),
-        (FanSetPercentage("fan.office", 60), "Fan speed → 60%"),
-        (FanSetDirection("fan.office", "reverse"), "Fan direction → reverse"),
+        (FanSetPercentage("fan.office", 60), "Fan office speed → 60%"),
+        (FanSetDirection("fan.office", "reverse"), "Fan office direction → reverse"),
         (SwitchTurnOn("switch.office_ac_power"), "A/C power on"),
         (SwitchTurnOff("switch.office_ac_power"), "A/C power off"),
     ]
@@ -120,14 +122,28 @@ def test_threshold_context_only_lists_devices_the_room_has():
         room_temp=78.0,
         ac=None,
         heater=None,
-        fan=None,
+        fans=(
+            FanControl(
+                info=FanInfo(
+                    "fan.office",
+                    is_on=False,
+                    preset_mode=None,
+                    percentage=0,
+                    preset_modes=(),
+                ),
+                use=False,
+                target=72.0,
+                medium=75.0,
+                high=78.0,
+                reverse=False,
+            ),
+        ),
         ac_fan=None,
         heater_fan=None,
         ac_power=None,
         heater_power=None,
         use_ac=True,
         use_heater=False,
-        use_fan=False,
         ac_fan_only_override=False,
         heater_fan_only_override=False,
         target_cooling=72.0,
@@ -136,14 +152,11 @@ def test_threshold_context_only_lists_devices_the_room_has():
         target_heating=68.0,
         heating_medium=65.0,
         heating_high=62.0,
-        target_fan=72.0,
-        fan_medium=75.0,
-        fan_high=78.0,
         command_delay_ms=1000,
         power_on_delay_ms=2000,
     )
     context = _threshold_context(room, inputs)
     assert "temp 78°F" in context
     assert "cooling target 72°F" in context
-    assert "fan target 72°F" in context
+    assert "fan office target 72°F" in context
     assert "heating target" not in context

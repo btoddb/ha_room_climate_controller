@@ -9,16 +9,29 @@ export interface ClipboardDevicePreset {
   temp?: number;
 }
 
+/** v3 per-fan clipboard entry, matched onto a target room's fans by `slug`. */
+export interface ClipboardFanPreset {
+  slug: string;
+  label?: string;
+  use?: boolean;
+  temp?: number;
+  reverse?: boolean;
+}
+
 export interface ClipboardRoomTemps {
   fanOverride?: boolean;
+  /** Legacy (v1/v2) single-fan reverse; superseded by per-fan `fans[].reverse`. */
   fanReverse?: boolean;
   cooling?: ClipboardDevicePreset | number;
   heating?: ClipboardDevicePreset | number;
+  /** Legacy (v1/v2) single-fan preset; superseded by `fans`. */
   fan?: ClipboardDevicePreset | number;
+  /** v3 per-fan presets. */
+  fans?: ClipboardFanPreset[];
 }
 
 export interface RoutineClipboardPayload {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   type: typeof CLIPBOARD_TYPE;
   rooms: Record<string, ClipboardRoomTemps>;
 }
@@ -66,28 +79,36 @@ export function buildClipboardPayload(
         entry.heating = { temp: heatingTemp, use: heatingUse };
       }
     }
-    if (room.has_fan !== false) {
-      const fanTemp = readTemp(hass, room.fan);
-      const fanUse = readUse(hass, room.useFan);
-      if (fanTemp !== undefined || fanUse !== undefined) {
-        entry.fan = { temp: fanTemp, use: fanUse };
+    if (room.has_fan !== false && room.fans.length > 0) {
+      const fans: ClipboardFanPreset[] = [];
+      for (const fan of room.fans) {
+        const fanTemp = readTemp(hass, fan.tempEntity);
+        const fanUse = readUse(hass, fan.useEntity);
+        const fanRev = fan.reversible ? readUse(hass, fan.reverseEntity) : undefined;
+        if (fanTemp === undefined && fanUse === undefined && fanRev === undefined) {
+          continue;
+        }
+        const fanEntry: ClipboardFanPreset = { slug: fan.slug, label: fan.label };
+        if (fanUse !== undefined) fanEntry.use = fanUse;
+        if (fanTemp !== undefined) fanEntry.temp = fanTemp;
+        if (fanRev !== undefined) fanEntry.reverse = fanRev;
+        fans.push(fanEntry);
       }
+      if (fans.length) entry.fans = fans;
     }
     const fanOvr = readUse(hass, room.fanOverride);
     if (fanOvr !== undefined) entry.fanOverride = fanOvr;
-    const fanRev = readUse(hass, room.fanReverse);
-    if (fanRev !== undefined) entry.fanReverse = fanRev;
 
     roomsMap[room.name] = entry;
   }
-  return { version: 2, type: CLIPBOARD_TYPE, rooms: roomsMap };
+  return { version: 3, type: CLIPBOARD_TYPE, rooms: roomsMap };
 }
 
 export function parseClipboardPayload(text: string): RoutineClipboardPayload | null {
   try {
     const data = JSON.parse(text) as RoutineClipboardPayload;
     if (
-      (data?.version === 1 || data?.version === 2) &&
+      (data?.version === 1 || data?.version === 2 || data?.version === 3) &&
       data?.type === CLIPBOARD_TYPE &&
       data.rooms &&
       typeof data.rooms === "object"
@@ -117,11 +138,6 @@ export function applyClipboardPayload(
       applied++;
     }
 
-    if (src.fanReverse !== undefined && entityConfigured(room.fanReverse)) {
-      setUse(room.fanReverse!, src.fanReverse);
-      applied++;
-    }
-
     const devices: {
       key: keyof ClipboardRoomTemps;
       useId?: string;
@@ -135,17 +151,11 @@ export function applyClipboardPayload(
         tempId: room.heating,
         enabled: room.has_heating !== false,
       },
-      { key: "fan", useId: room.useFan, tempId: room.fan, enabled: room.has_fan !== false },
     ];
 
     for (const dev of devices) {
       if (!dev.enabled) continue;
-      const raw =
-        dev.key === "cooling"
-          ? src.cooling
-          : dev.key === "heating"
-            ? src.heating
-            : src.fan;
+      const raw = dev.key === "cooling" ? src.cooling : src.heating;
       const preset = normalizeDevice(raw);
       if (!preset) continue;
 
@@ -157,6 +167,71 @@ export function applyClipboardPayload(
         setValue(dev.tempId!, preset.temp);
         applied++;
       }
+    }
+
+    applied += applyFans(room, src, setValue, setUse);
+  }
+  return applied;
+}
+
+/** Apply the clipboard's fan presets onto a target room's fans.
+
+v3 payloads carry a per-fan `fans[]` matched by slug: a clipboard fan for a slug
+the room lacks is ignored, and a room fan with no clipboard entry keeps its
+current value. Legacy v1/v2 payloads carry a single `fan`/`fanReverse` with no
+slug, which is applied to every fan in the target room. */
+function applyFans(
+  room: RoomPresetConfig,
+  src: ClipboardRoomTemps,
+  setValue: (entityId: string, value: number) => void,
+  setUse: (entityId: string, on: boolean) => void
+): number {
+  if (room.has_fan === false || room.fans.length === 0) return 0;
+  let applied = 0;
+
+  if (Array.isArray(src.fans)) {
+    const bySlug = new Map(src.fans.map((f) => [f.slug, f]));
+    for (const fan of room.fans) {
+      const cf = bySlug.get(fan.slug);
+      if (!cf) continue; // target fan with no clipboard entry keeps its value
+      if (cf.use !== undefined && entityConfigured(fan.useEntity)) {
+        setUse(fan.useEntity, cf.use);
+        applied++;
+      }
+      if (cf.temp !== undefined && entityConfigured(fan.tempEntity)) {
+        setValue(fan.tempEntity, cf.temp);
+        applied++;
+      }
+      if (
+        cf.reverse !== undefined &&
+        fan.reversible &&
+        entityConfigured(fan.reverseEntity)
+      ) {
+        setUse(fan.reverseEntity, cf.reverse);
+        applied++;
+      }
+    }
+    return applied;
+  }
+
+  // Legacy single-fan clipboard (v1/v2): apply to every fan in the room.
+  const legacy = normalizeDevice(src.fan);
+  for (const fan of room.fans) {
+    if (legacy?.use !== undefined && entityConfigured(fan.useEntity)) {
+      setUse(fan.useEntity, legacy.use);
+      applied++;
+    }
+    if (legacy?.temp !== undefined && entityConfigured(fan.tempEntity)) {
+      setValue(fan.tempEntity, legacy.temp);
+      applied++;
+    }
+    if (
+      src.fanReverse !== undefined &&
+      fan.reversible &&
+      entityConfigured(fan.reverseEntity)
+    ) {
+      setUse(fan.reverseEntity, src.fanReverse);
+      applied++;
     }
   }
   return applied;

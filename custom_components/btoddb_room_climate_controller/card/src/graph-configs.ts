@@ -47,6 +47,15 @@ export function buildEnergyGraphConfig(
 
 type DeviceTraceKind = "cooling" | "heating" | "fan";
 
+/** Distinct hues cycled across a room's fan traces (starts at the old single-fan
+teal, then greens/purples that read apart from cooling/heating). */
+const FAN_TRACE_COLORS = [
+  "rgb(0,180,160)",
+  "rgb(120,200,60)",
+  "rgb(160,100,220)",
+  "rgb(230,160,40)",
+];
+
 /** plotly-graph: y = state.state for climate; use map_y with state + y fallback. */
 function climateMapY(kind: "cooling" | "heating"): string {
   const activeMode = kind === "cooling" ? "cool" : "heat";
@@ -133,10 +142,19 @@ export function buildHistoryGraphConfig(
 
   const ac = deviceTrace(config.ac_entity, "Cooling", "rgb(30,144,255)", "cooling");
   const heat = deviceTrace(config.heater_entity, "Heating", "rgb(220,60,60)", "heating");
-  const fan = deviceTrace(config.fan_entity, "Fan", "rgb(0,180,160)", "fan");
   if (ac) entities.push(ac);
   if (heat) entities.push(heat);
-  if (fan) entities.push(fan);
+  // One trace per fan, each in a distinct teal/green/purple hue so multiple
+  // fans stay visually separable on the shared State axis.
+  config.fans.forEach((fan, i) => {
+    const trace = deviceTrace(
+      fan.entity_id,
+      fan.label,
+      FAN_TRACE_COLORS[i % FAN_TRACE_COLORS.length],
+      "fan"
+    );
+    if (trace) entities.push(trace);
+  });
 
   return {
     type: "custom:plotly-graph",

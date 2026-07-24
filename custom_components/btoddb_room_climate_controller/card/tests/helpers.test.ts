@@ -66,6 +66,20 @@ describe("getEffectiveTargetLimits", () => {
       max: 75,
     });
   });
+
+  it("resolves each fan independently against the shared high offset", () => {
+    // A room can have several fans; they share one high offset and the same
+    // min/max, and never constrain each other (no sibling coupling). So every
+    // fan resolves the same effective range regardless of the others' targets.
+    const shared = { min: 60, max: 90 };
+    const highOffset = 5;
+    const fanA = getEffectiveTargetLimits("fan", shared, undefined, highOffset);
+    const fanB = getEffectiveTargetLimits("fan", shared, undefined, highOffset);
+    assert.deepEqual(fanA, { min: 60, max: 85 });
+    assert.deepEqual(fanB, { min: 60, max: 85 });
+    // A sibling target is ignored for fans even when supplied.
+    assert.deepEqual(limitsFor("fan", 70, 60, 90, 5), { min: 60, max: 85 });
+  });
 });
 
 describe("getNumberLimits", () => {

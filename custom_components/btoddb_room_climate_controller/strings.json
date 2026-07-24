@@ -59,7 +59,10 @@
             "heater_fan_entity": "Heater companion fan",
             "heater_power_switch": "Heater power switch",
             "heater_fan_only_override": "Allow heater fan-only circulation",
-            "fan_entity": "Standalone fan entity"
+            "fan_entities": "Fans"
+          },
+          "data_description": {
+            "fan_entities": "Standalone fans in this room (each gets its own target temperature; they share the room's fan-speed offsets)."
           }
         },
         "sensors": {

@@ -10,15 +10,19 @@ Profiles are integration **storage records** — not HA automations.
 A profile ([`models.py`](../../custom_components/btoddb_room_climate_controller/models.py)
 `Profile`) belongs to a room and holds:
 
-- **PR-1** `id` (canonical 2-digit, e.g. `08`), `name` (display), `room` (room key), `enabled`, `time` (`HH:MM`, 24h), `fan_override` (bool), `fan_reverse` (bool), and a per-device `presets` map.
-- **PR-2** Each device preset (`DevicePreset`) has a **use** toggle and a **target temp**. New profiles default presets to *use off, temp = the device's min limit*.
-- **PR-3** A profile only carries presets for the device types its room has. Moving a profile to another room re-seeds presets for that room's devices.
+- **PR-1** `id` (canonical 2-digit, e.g. `08`), `name` (display), `room` (room key), `enabled`, `time` (`HH:MM`, 24h), `fan_override` (bool), a per-device `presets` map for cooling/heating, and a **per-fan preset map** for the room's standalone fans (keyed by fan slug). The single profile-level `fan_reverse` is replaced by a per-fan `reverse` inside each fan preset.
+- **PR-2** Each cooling/heating device preset (`DevicePreset`) has a **use** toggle and a **target temp**. Each **fan** preset carries a full per-fan set: **use** toggle, **target temp**, and **reverse**. New profiles default all presets to *use off, temp = the device's min limit* (and fan reverse off).
+- **PR-3** A profile only carries presets for the device types its room has — and one fan preset per standalone fan the room has. Moving a profile to another room re-seeds presets (including per-fan presets) for that room's devices.
 - Profiles are persisted in `.storage` ([`store.py`](../../custom_components/btoddb_room_climate_controller/store.py)) and exposed as entities (`switch.*` enabled, `time.*`, `number.*` presets) so they're editable outside the card too.
+
+> **Legacy migration:** a pre-existing profile with a single fan preset and a
+> profile-level `fan_reverse` is migrated to the per-fan preset map — the legacy
+> single fan preset (use/target) and `fan_reverse` seed **every** fan in the room.
 
 ## What applying a profile does
 
-- **PR-4** Applying writes the room's live entities: each device's **Use** switch and **target temp** number, plus the room's **fan-only override** switch (when the room supports it). It does **not** touch the hardware directly — the controller reacts to those entity changes.
-- **PR-12** A profile's `fan_reverse` is applied the same way: the apply writes the room's **Fan reverse** switch (when the room has a standalone fan), and the controller reacts per CC-22 — scheduled and explicit applies alike. The per-profile toggle is exposed as a `switch.*` entity like the other presets.
+- **PR-4** Applying writes the room's live entities: each cooling/heating device's **Use** switch and **target temp** number, **each fan's** own **Use** switch and **target temp** number, plus the room's **fan-only override** switch (when the room supports it). It does **not** touch the hardware directly — the controller reacts to those entity changes.
+- **PR-12** Each fan preset's `reverse` is applied the same way: the apply writes **that fan's** **Fan reverse** switch, and the controller reacts per CC-22 — scheduled and explicit applies alike. Each per-fan reverse toggle is exposed as a `switch.*` entity like the other presets.
 - **PR-5** A **scheduled** apply is **skipped if the room is in manual mode** (CC-15). An explicit **"apply now"** (`force=True`) applies regardless of manual mode.
 
 ## Scheduling
@@ -32,11 +36,11 @@ time or enabled flag changes.
 
 ## Copy / paste
 
-- **PR-8** **Copy** puts a profile's settings (presets + fan override + fan reverse) on the clipboard. **Name and time are never copied.**
+- **PR-8** **Copy** puts a profile's settings (device presets + fan override + the full per-fan presets, each with its use/target/reverse) on the clipboard. **Name and time are never copied.**
 - **PR-9** **Paste** replaces the target profile's settings from the clipboard, but keeps its name and time. When pasting across rooms with different devices:
-  - A clipboard temp for a device the target doesn't have is **ignored**.
-  - A target device with no value on the clipboard keeps its **current** value.
-- **PR-10** A **"copy room"** action seeds a new profile from the room's current live settings.
+  - A clipboard temp for a device the target doesn't have is **ignored**. Likewise, a clipboard **fan entry for a fan the target room doesn't have is ignored** (paste is matched per fan slug).
+  - A target device — or a target fan — with no value on the clipboard keeps its **current** value.
+- **PR-10** A **"copy room"** action seeds a new profile from the room's current live settings, seeding **each fan's** preset (use/target/reverse) from that fan's live entities.
 
 ## Semantic checks
 

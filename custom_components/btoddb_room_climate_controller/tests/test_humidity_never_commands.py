@@ -31,7 +31,7 @@ def _room(**overrides):
         "combined": False,
         "ac_climate": "climate.office_ac",
         "heater_climate": None,
-        "fan_entity": None,
+        "fan_entities": (),
         "ac_fan_entity": None,
         "heater_fan_entity": None,
         "ac_power_switch": None,
