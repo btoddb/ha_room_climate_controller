@@ -151,6 +151,18 @@ class FanInfo:
 
 
 @dataclass(frozen=True)
+class FanControl:
+    """A single standalone fan's live state plus its resolved control values."""
+
+    info: FanInfo
+    use: bool
+    target: float
+    medium: float  # target + shared medium offset (absolute threshold)
+    high: float  # target + shared high offset (absolute threshold)
+    reverse: bool
+
+
+@dataclass(frozen=True)
 class SwitchInfo:
     """Current state of a power switch."""
 
@@ -167,15 +179,14 @@ class EngineInputs:
     # devices (None when the room lacks them)
     ac: ClimateInfo | None
     heater: ClimateInfo | None
-    fan: FanInfo | None
     ac_fan: FanInfo | None
     heater_fan: FanInfo | None
+    fans: tuple[FanControl, ...]
     ac_power: SwitchInfo | None
     heater_power: SwitchInfo | None
     # use toggles + overrides
     use_ac: bool
     use_heater: bool
-    use_fan: bool
     ac_fan_only_override: bool
     heater_fan_only_override: bool
     # setpoints / thresholds
@@ -185,16 +196,11 @@ class EngineInputs:
     target_heating: float
     heating_medium: float
     heating_high: float
-    target_fan: float
-    fan_medium: float
-    fan_high: float
     command_delay_ms: int
     power_on_delay_ms: int
     # window sensor: True when the room's window is open. Suppresses active
     # cooling/heating (Cool/Heat) only — fan-only circulation is unaffected.
     window_open: bool = False
-    # requested standalone-fan direction: True → reverse, False → forward (CC-22)
-    fan_reverse: bool = False
 
     # derived helpers ----------------------------------------------------
     @property
@@ -209,8 +215,13 @@ class EngineInputs:
 
     @property
     def has_fan(self) -> bool:
-        """Return True when a standalone fan entity is configured."""
-        return self.fan is not None
+        """Return True when the room has one or more standalone fans."""
+        return bool(self.fans)
+
+    @property
+    def use_fan(self) -> bool:
+        """Whether any standalone fan's Use toggle is on (CC-12 fan-only override)."""
+        return any(f.use for f in self.fans)
 
     @property
     def ac_setpoint_int(self) -> int:
@@ -228,14 +239,6 @@ class EngineInputs:
     def target_heating_int(self) -> int:
         """Return the heating target truncated to whole degrees."""
         return int(self.target_heating)
-
-    @property
-    def fan_needs_on(self) -> bool:
-        """Whether the standalone fan should run (CC-27 cooling-style hysteresis)."""
-        if not self.use_fan:
-            return False
-        running = self.fan is not None and self.fan.is_on
-        return _wants_cool(self.room_temp, self.target_fan, running)
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +372,8 @@ def compute_commands(inp: EngineInputs) -> list[Command]:
             _split_ac(inp, out)
         if inp.heater is not None:
             _split_heater(inp, out)
-    if inp.fan is not None:
-        _standalone_fan(inp, out)
+    for fan in inp.fans:
+        _standalone_fan(fan, inp, out)
     return out.items
 
 
@@ -641,31 +644,34 @@ def _same_fan_speed(reported: int, target: int, step: float) -> bool:
 # ---------------------------------------------------------------------------
 # Standalone fan (shared by both branches)
 # ---------------------------------------------------------------------------
-def _standalone_fan(inp: EngineInputs, out: _Out) -> None:
-    fan = inp.fan
-    assert fan is not None
-    if not inp.fan_needs_on:
-        if fan.is_on:
-            out.add(FanTurnOff(fan.entity_id))
+def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
+    info = fan.info
+    # CC-13/CC-27: run when Use fan on and past the fan threshold (cooling-style
+    # hysteresis keyed on the fan's own reported on/off state).
+    needs_on = fan.use and _wants_cool(inp.room_temp, fan.target, info.is_on)
+    if not needs_on:
+        if info.is_on:
+            out.add(FanTurnOff(info.entity_id))
         return
-    label, percent = cooling_speed(inp.room_temp, inp.fan_medium, inp.fan_high)
-    if not fan.is_on:
-        out.add(FanTurnOn(fan.entity_id), Delay(inp.command_delay_ms))
-    if label in fan.preset_modes:
-        if (fan.preset_mode or "").lower() != label:
-            out.add(FanSetPreset(fan.entity_id, label))
-    elif not _same_fan_speed(fan.percentage, percent, fan.percentage_step):
-        out.add(FanSetPercentage(fan.entity_id, percent))
+    # CC-14: speed follows the cooling-style tiers against this fan's thresholds.
+    label, percent = cooling_speed(inp.room_temp, fan.medium, fan.high)
+    if not info.is_on:
+        out.add(FanTurnOn(info.entity_id), Delay(inp.command_delay_ms))
+    if label in info.preset_modes:
+        if (info.preset_mode or "").lower() != label:
+            out.add(FanSetPreset(info.entity_id, label))
+    elif not _same_fan_speed(info.percentage, percent, info.percentage_step):
+        out.add(FanSetPercentage(info.entity_id, percent))
     # Direction (CC-22..CC-24): only reversible fans, only while running, and
     # only when the reported direction differs (unknown never matches).
-    if fan.reversible:
-        desired = REVERSE if inp.fan_reverse else FORWARD
-        if fan.direction != desired:
+    if info.reversible:
+        desired = REVERSE if fan.reverse else FORWARD
+        if info.direction != desired:
             out.add(
                 FanSetDirection(
-                    fan.entity_id,
+                    info.entity_id,
                     desired,
-                    via_preset=fan.direction_via_preset,
-                    forward_preset=fan.forward_preset,
+                    via_preset=info.direction_via_preset,
+                    forward_preset=info.forward_preset,
                 )
             )

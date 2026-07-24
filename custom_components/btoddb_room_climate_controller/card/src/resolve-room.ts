@@ -51,7 +51,7 @@ export function resolveRoomConfig(
   const live = (device: string): WsRoomLive => e.live[device] ?? EMPTY_LIVE;
   const cool = live("cooling");
   const heat = live("heating");
-  const fan = live("fan");
+  const fanOffsets = e.fan_offsets;
 
   return defaultConfig({
     type: "custom:room-climate-control",
@@ -63,13 +63,19 @@ export function resolveRoomConfig(
     power_sensor: e.power ?? "",
     ac_entity: e.ac_entity ?? "",
     heater_entity: e.heater_entity ?? "",
-    fan_entity: e.fan_entity ?? "",
     window_sensors: e.window_sensors ?? [],
     manual_mode: e.manual_mode ?? "",
     ac_fan_only_override: e.ac_fan_only_override ?? "",
     heater_fan_only_override: e.heater_fan_only_override ?? "",
-    fan_reversible: room.fan_reversible ?? false,
-    fan_reverse_toggle: e.fan_reverse ?? "",
+    fans: (e.fans ?? []).map((f) => ({
+      entity_id: f.entity_id,
+      slug: f.slug,
+      label: f.label,
+      reversible: f.reversible ?? false,
+      use: f.use ?? "",
+      target: f.target ?? "",
+      reverse: f.reverse ?? "",
+    })),
     use_ac: cool.use ?? "",
     target_cooling: cool.target ?? "",
     cooling_medium_offset: cool.medium_offset ?? "",
@@ -78,10 +84,8 @@ export function resolveRoomConfig(
     target_heating: heat.target ?? "",
     heating_medium_offset: heat.medium_offset ?? "",
     heating_high_offset: heat.high_offset ?? "",
-    use_fan: fan.use ?? "",
-    target_fan: fan.target ?? "",
-    fan_medium_offset: fan.medium_offset ?? "",
-    fan_high_offset: fan.high_offset ?? "",
+    fan_medium_offset: fanOffsets?.medium_offset ?? "",
+    fan_high_offset: fanOffsets?.high_offset ?? "",
     // Outdoor + time-range fall back to the integration's hub entities (the
     // outdoor mirror and the graph time-range select) before any hard default.
     outdoor_sensor: user.outdoor_sensor ?? e.outdoor ?? DEFAULT_OUTDOOR_SENSOR,

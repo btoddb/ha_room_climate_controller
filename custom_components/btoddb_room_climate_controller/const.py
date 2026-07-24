@@ -69,7 +69,8 @@ CONF_COMBINED: Final = "combined"  # ac_climate == heater_climate (heat pump)
 # Device entities driven by the reactive engine
 CONF_AC_CLIMATE: Final = "ac_climate"
 CONF_HEATER_CLIMATE: Final = "heater_climate"
-CONF_FAN_ENTITY: Final = "fan_entity"
+CONF_FAN_ENTITIES: Final = "fan_entities"
+CONF_FAN_ENTITY_LEGACY: Final = "fan_entity"  # pre-#66 single-fan key
 CONF_AC_FAN_ENTITY: Final = "ac_fan_entity"
 CONF_HEATER_FAN_ENTITY: Final = "heater_fan_entity"
 CONF_AC_POWER_SWITCH: Final = "ac_power_switch"
@@ -149,7 +150,6 @@ KEY_USE: Final = {
 KEY_MANUAL_MODE: Final = "manual_mode"
 KEY_AC_FAN_ONLY: Final = "ac_fan_only_override"
 KEY_HEATER_FAN_ONLY: Final = "heater_fan_only_override"
-KEY_FAN_REVERSE: Final = "fan_reverse"
 KEY_ROOM_TEMPERATURE: Final = "room_temperature"
 KEY_ROOM_HUMIDITY: Final = "room_humidity"
 KEY_ROOM_POWER: Final = "room_power"
@@ -162,7 +162,6 @@ KEY_GRAPH_TIME_RANGE: Final = "graph_time_range"
 KEY_PROFILE_ENABLED: Final = "enabled"
 KEY_PROFILE_TIME: Final = "time"
 KEY_PROFILE_FAN_OVERRIDE: Final = "fan_override"
-KEY_PROFILE_FAN_REVERSE: Final = "fan_reverse"
 KEY_PROFILE_PRESET: Final = {  # preset target temp per device
     DEVICE_COOLING: "cooling",
     DEVICE_HEATING: "heating",

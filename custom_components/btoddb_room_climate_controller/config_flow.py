@@ -24,7 +24,7 @@ from .const import (
     CONF_AREA_ID,
     CONF_COMBINED,
     CONF_COMMAND_DELAY,
-    CONF_FAN_ENTITY,
+    CONF_FAN_ENTITIES,
     CONF_HAS_AC,
     CONF_HAS_FAN,
     CONF_HAS_HEATER,
@@ -110,6 +110,7 @@ def _entity(
 
 _CLIMATE = _entity("climate")
 _FAN = _entity("fan")
+_FAN_MULTI = _entity("fan", multiple=True)
 _SWITCH = _entity("switch")
 _BOOL = selector.BooleanSelector()
 
@@ -214,12 +215,12 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                 key = vol_key.schema
                 self._data[key] = user_input.get(key)
             _LOGGER.debug(
-                "[room=%s] devices saved: ac=%s ac_fan=%s heater=%s fan=%s",
+                "[room=%s] devices saved: ac=%s ac_fan=%s heater=%s fans=%s",
                 self._data.get(CONF_ROOM_KEY),
                 self._data.get(CONF_AC_CLIMATE),
                 self._data.get(CONF_AC_FAN_ENTITY),
                 self._data.get(CONF_HEATER_CLIMATE),
-                self._data.get(CONF_FAN_ENTITY),
+                self._data.get(CONF_FAN_ENTITIES),
             )
             self._log_device_capabilities()
             return await self.async_step_sensors()
@@ -253,8 +254,13 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                     label,
                     describe_climate_capabilities(self.hass, entity_id),
                 )
+        for entity_id in self._data.get(CONF_FAN_ENTITIES) or ():
+            _CAPABILITIES_LOGGER.info(
+                "[room=%s] Fan capabilities: %s",
+                room_key,
+                describe_fan_capabilities(self.hass, entity_id),
+            )
         for label, key in (
-            ("Fan", CONF_FAN_ENTITY),
             ("A/C fan", CONF_AC_FAN_ENTITY),
             ("Heater fan", CONF_HEATER_FAN_ENTITY),
         ):
@@ -412,7 +418,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
             ]
         if self._data.get(CONF_HAS_FAN):
             fields += [
-                (vol.Optional(CONF_FAN_ENTITY), _FAN),
+                (vol.Optional(CONF_FAN_ENTITIES), _FAN_MULTI),
             ]
         return fields
 

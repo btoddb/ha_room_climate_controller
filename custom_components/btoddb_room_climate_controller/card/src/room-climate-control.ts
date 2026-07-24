@@ -8,7 +8,9 @@ import {
 } from "./graph-configs";
 import {
   buildDeviceSettingsFields,
+  buildFanSettingsFields,
   renderDeviceSettingsSection,
+  renderFanSettingsSection,
   renderRoomSettingsSection,
 } from "./settings-ui";
 import { GraphOverlay } from "./graph-overlay";
@@ -366,15 +368,19 @@ export class RoomClimateControl extends LitElement {
       sharedClimateDevice ? undefined : c.heater_fan_only_override,
       winOpen
     );
-    addDevice(
-      "Fan",
-      "fan",
-      c.fan_entity,
-      c.use_fan,
-      c.target_fan,
-      c.fan_high_offset,
-      (hass, id) => getFanMode(hass, id, c.fan_reversible ?? false)
-    );
+    // One row per fan. All fans share the room's single high offset (used only
+    // for the effective-limit math), but each has its own use/target/reverse.
+    for (const fan of c.fans) {
+      addDevice(
+        fan.label,
+        "fan",
+        fan.entity_id,
+        fan.use,
+        fan.target,
+        c.fan_high_offset,
+        (hass, id) => getFanMode(hass, id, fan.reversible)
+      );
+    }
 
     if (rows.length === 0) return nothing;
 
@@ -414,6 +420,7 @@ export class RoomClimateControl extends LitElement {
   private _renderSettingsDialog() {
     if (!this._config) return nothing;
     const deviceSections = buildDeviceSettingsFields(this._config);
+    const fanFields = buildFanSettingsFields(this._config);
     return html`
       <ha-dialog
         open
@@ -426,6 +433,7 @@ export class RoomClimateControl extends LitElement {
           ${deviceSections.map((fields) =>
             renderDeviceSettingsSection(this.hass, fields)
           )}
+          ${fanFields ? renderFanSettingsSection(this.hass, fanFields) : nothing}
         </div>
       </ha-dialog>
     `;

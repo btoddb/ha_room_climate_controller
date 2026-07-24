@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from homeassistant.components.fan import FanEntityFeature
@@ -15,7 +16,21 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import DOMAIN, SIGNAL_REMOVE_PROFILE
-from .models import Profile, Room, profile_uid, room_uid
+from .models import (
+    Profile,
+    Room,
+    fan_reverse_key,
+    fan_slug,
+    fan_target_key,
+    fan_use_key,
+    profile_fan_reverse_key,
+    profile_fan_temp_key,
+    profile_fan_use_key,
+    profile_uid,
+    room_uid,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def fan_supports_direction(hass: HomeAssistant, entity_id: str | None) -> bool:
@@ -202,6 +217,84 @@ def async_migrate_profile_subentries(hass: HomeAssistant, entry: ConfigEntry) ->
                 device.id,
                 remove_config_entry_id=entry.entry_id,
                 remove_config_subentry_id=None,
+            )
+
+
+@callback
+def async_migrate_fan_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """
+    Rename pre-#66 single-fan unique_ids to the per-fan slugged form.
+
+    Only for rooms with exactly one fan (unambiguous). Renames the room's
+    target/use/reverse entities and each profile's fan preset entities so
+    restored state and history survive the multi-fan upgrade. No-op when the
+    slugged entity already exists or the legacy one doesn't.
+    """
+    hub = getattr(entry, "runtime_data", None)
+    if hub is None:
+        return
+    ent_reg = er.async_get(hass)
+
+    def _rename(domain: str, old_uid: str, new_uid: str) -> None:
+        if old_uid == new_uid:
+            return
+        entity_id = ent_reg.async_get_entity_id(domain, DOMAIN, old_uid)
+        if entity_id is None:
+            return
+        if ent_reg.async_get_entity_id(domain, DOMAIN, new_uid) is not None:
+            return
+        try:
+            ent_reg.async_update_entity(entity_id, new_unique_id=new_uid)
+        except ValueError:
+            _LOGGER.debug(
+                "Fan unique_id migration skipped for %s (%s -> %s)",
+                entity_id,
+                old_uid,
+                new_uid,
+            )
+
+    rid = entry.entry_id
+    for room in hub.rooms.values():
+        if len(room.fan_entities) != 1:
+            continue
+        slug = fan_slug(room.fan_entities[0])
+        rk = room.key
+        # Legacy single-fan room suffixes: "target_fan_temp", "use_fan",
+        # "fan_reverse".
+        _rename(
+            "number",
+            room_uid(rid, rk, "target_fan_temp"),
+            room_uid(rid, rk, fan_target_key(slug)),
+        )
+        _rename(
+            "switch",
+            room_uid(rid, rk, "use_fan"),
+            room_uid(rid, rk, fan_use_key(slug)),
+        )
+        _rename(
+            "switch",
+            room_uid(rid, rk, "fan_reverse"),
+            room_uid(rid, rk, fan_reverse_key(slug)),
+        )
+        for profile in hub.profiles:
+            if profile.room != room.key:
+                continue
+            # Legacy profile fan-preset suffixes: "fan" (KEY_PROFILE_PRESET),
+            # "use_fan" (KEY_PROFILE_USE), "fan_reverse".
+            _rename(
+                "number",
+                profile_uid(rid, profile.id, "fan"),
+                profile_uid(rid, profile.id, profile_fan_temp_key(slug)),
+            )
+            _rename(
+                "switch",
+                profile_uid(rid, profile.id, "use_fan"),
+                profile_uid(rid, profile.id, profile_fan_use_key(slug)),
+            )
+            _rename(
+                "switch",
+                profile_uid(rid, profile.id, "fan_reverse"),
+                profile_uid(rid, profile.id, profile_fan_reverse_key(slug)),
             )
 
 
