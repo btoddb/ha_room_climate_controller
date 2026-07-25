@@ -27,6 +27,14 @@ export interface FanSettingsFields {
   highOffset: string;
 }
 
+/** The room's humidity target + shared medium/high offsets (CC-28); they drive
+the room's fans, so the section renders after the Fan section (UX-31). */
+export interface HumiditySettingsFields {
+  target: string;
+  mediumOffset: string;
+  highOffset: string;
+}
+
 function parseNum(hass: HomeAssistant, entityId: string, fallback = 0): number {
   const v = parseFloat(hass.states[entityId]?.state ?? "");
   return Number.isNaN(v) ? fallback : v;
@@ -84,10 +92,30 @@ export function buildFanSettingsFields(
   };
 }
 
+/** Humidity settings, or null when the room has no humidity control — the
+integration only creates all three entities together (CC-28). */
+export function buildHumiditySettingsFields(
+  config: RoomClimateControlConfig
+): HumiditySettingsFields | null {
+  if (
+    !entityConfigured(config.humidity_target) ||
+    !entityConfigured(config.humidity_medium_offset) ||
+    !entityConfigured(config.humidity_high_offset)
+  ) {
+    return null;
+  }
+  return {
+    target: config.humidity_target,
+    mediumOffset: config.humidity_medium_offset,
+    highOffset: config.humidity_high_offset,
+  };
+}
+
 function renderTargetRow(
   hass: HomeAssistant,
   entityId: string,
-  label: string
+  label: string,
+  unit = "°F"
 ): TemplateResult | typeof nothing {
   const obj = getStateObj(hass, entityId);
   if (!obj) return nothing;
@@ -112,7 +140,7 @@ function renderTargetRow(
             if (!Number.isNaN(n)) setInputNumber(hass, entityId, n);
           }}
         />
-        <span class="settings-unit">°F</span>
+        <span class="settings-unit">${unit}</span>
       </div>
     </div>
   `;
@@ -122,7 +150,8 @@ function renderOffsetSlider(
   hass: HomeAssistant,
   entityId: string,
   label: string,
-  computed: number | null
+  computed: number | null,
+  unit = "°F"
 ): TemplateResult | typeof nothing {
   const obj = getStateObj(hass, entityId);
   if (!obj) return nothing;
@@ -136,7 +165,7 @@ function renderOffsetSlider(
       <div class="settings-row-label-block">
         <span class="settings-row-label">${label}</span>
         ${computed !== null
-          ? html`<span class="settings-computed">→ ${computed.toFixed(0)}°F</span>`
+          ? html`<span class="settings-computed">→ ${computed.toFixed(0)}${unit}</span>`
           : nothing}
       </div>
       <div class="settings-row-control settings-slider-control">
@@ -152,7 +181,7 @@ function renderOffsetSlider(
             if (!Number.isNaN(n)) setInputNumber(hass, entityId, n);
           }}
         />
-        <span class="settings-offset-value">${val}°F</span>
+        <span class="settings-offset-value">${val}${unit}</span>
       </div>
     </div>
   `;
@@ -240,6 +269,24 @@ export function renderFanSettingsSection(
       )}
       ${renderOffsetSlider(hass, fields.mediumOffset, "Medium offset", medComputed)}
       ${renderOffsetSlider(hass, fields.highOffset, "High offset", highComputed)}
+    </div>
+  `;
+}
+
+export function renderHumiditySettingsSection(
+  hass: HomeAssistant,
+  fields: HumiditySettingsFields
+): TemplateResult {
+  // Humidity offsets add to the target (damper ⇒ faster), like cooling.
+  const medComputed = computedThreshold(hass, fields.target, fields.mediumOffset, false);
+  const highComputed = computedThreshold(hass, fields.target, fields.highOffset, false);
+
+  return html`
+    <div class="settings-section">
+      <div class="settings-section-title">Humidity</div>
+      ${renderTargetRow(hass, fields.target, "Target", "%")}
+      ${renderOffsetSlider(hass, fields.mediumOffset, "Medium offset", medComputed, "%")}
+      ${renderOffsetSlider(hass, fields.highOffset, "High offset", highComputed, "%")}
     </div>
   `;
 }

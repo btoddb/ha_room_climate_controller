@@ -12,10 +12,21 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import (
     DEFAULT_HIGH_OFFSET,
+    DEFAULT_HUMIDITY_HIGH_OFFSET,
+    DEFAULT_HUMIDITY_MEDIUM_OFFSET,
+    DEFAULT_HUMIDITY_TARGET,
     DEFAULT_MEDIUM_OFFSET,
     DEVICE_FAN,
     DEVICE_ICONS,
+    HUMIDITY_OFFSET_MAX,
+    HUMIDITY_OFFSET_MIN,
+    HUMIDITY_TARGET_MAX,
+    HUMIDITY_TARGET_MIN,
+    HUMIDITY_UNIT,
     KEY_HIGH_OFFSET,
+    KEY_HUMIDITY_HIGH_OFFSET,
+    KEY_HUMIDITY_MEDIUM_OFFSET,
+    KEY_HUMIDITY_TARGET,
     KEY_MEDIUM_OFFSET,
     KEY_PROFILE_PRESET,
     KEY_TARGET,
@@ -62,6 +73,7 @@ class _NumberSpec:
     maximum: float
     step: float
     default: float
+    unit: str = TEMP_UNIT
 
 
 def _room_specs(room: Room) -> list[_NumberSpec]:
@@ -92,6 +104,45 @@ def _room_specs(room: Room) -> list[_NumberSpec]:
                     default=DEFAULT_HIGH_OFFSET,
                 )
             )
+            # ...plus a humidity target + its own offsets when the room also
+            # reports humidity (the fan branch already implies has_fan).
+            if room.humidity_sensor:
+                specs.append(
+                    _NumberSpec(
+                        key=KEY_HUMIDITY_TARGET,
+                        name="Humidity target",
+                        icon="mdi:water-percent",
+                        minimum=HUMIDITY_TARGET_MIN,
+                        maximum=HUMIDITY_TARGET_MAX,
+                        step=1,
+                        default=DEFAULT_HUMIDITY_TARGET,
+                        unit=HUMIDITY_UNIT,
+                    )
+                )
+                specs.append(
+                    _NumberSpec(
+                        key=KEY_HUMIDITY_MEDIUM_OFFSET,
+                        name="Humidity medium offset",
+                        icon="mdi:fan-speed-2",
+                        minimum=HUMIDITY_OFFSET_MIN,
+                        maximum=HUMIDITY_OFFSET_MAX,
+                        step=1,
+                        default=DEFAULT_HUMIDITY_MEDIUM_OFFSET,
+                        unit=HUMIDITY_UNIT,
+                    )
+                )
+                specs.append(
+                    _NumberSpec(
+                        key=KEY_HUMIDITY_HIGH_OFFSET,
+                        name="Humidity high offset",
+                        icon="mdi:fan-speed-3",
+                        minimum=HUMIDITY_OFFSET_MIN,
+                        maximum=HUMIDITY_OFFSET_MAX,
+                        step=1,
+                        default=DEFAULT_HUMIDITY_HIGH_OFFSET,
+                        unit=HUMIDITY_UNIT,
+                    )
+                )
             # ...and a per-fan target temp.
             specs.extend(
                 _NumberSpec(
@@ -206,7 +257,7 @@ class RoomNumber(RestoreNumber):
         self._attr_native_min_value = spec.minimum
         self._attr_native_max_value = spec.maximum
         self._attr_native_step = spec.step
-        self._attr_native_unit_of_measurement = TEMP_UNIT
+        self._attr_native_unit_of_measurement = spec.unit
         self._attr_device_info = room_device_info(entry, room)
         self._default = spec.default
         self._room_key = room.key
@@ -227,7 +278,11 @@ class RoomNumber(RestoreNumber):
         self.async_write_ha_state()
         if old != value:
             _SETTINGS_LOGGER.info(
-                "[room=%s] %s → %s°F", self._room_key, self._attr_name, int(value)
+                "[room=%s] %s → %s%s",
+                self._room_key,
+                self._attr_name,
+                int(value),
+                self._attr_native_unit_of_measurement,
             )
 
 

@@ -44,16 +44,18 @@ appear.
   as its own `RCC commanded` line (CC-L7), tagged with the triggering reason,
   so the log never reports a command that wasn't actually sent.
 - **CC-L2** When the controller detects a room's humidity sensor change:
-  `[room=<key>] Humidity changed: <old> → <new>%%`
-  Also logged on the `…btoddb_room_climate_controller.sensor` logger. The engine
-  ignores humidity, and the controller enforces this structurally: a humidity
-  change returns immediately after logging — it never resubscribes or
-  requests an evaluation, so a humidity-only change **cannot** command a
-  device, even indirectly.
+  `[room=<key>] Humidity changed: <old> → <new>%`
+  Also logged on the `…btoddb_room_climate_controller.sensor` logger. Like
+  temperature (CC-L1), a humidity change **triggers an evaluation in rooms with
+  at least one standalone fan** — there the engine may command fans per
+  CC-28..CC-30, and any resulting commands appear on their own `RCC commanded`
+  line (CC-L7) with trigger reason `humidity <old>→<new>%`. In a room **without
+  fans** the change is still logged but triggers **no** evaluation, since
+  humidity is inert there (CC-28). No predicted command list is appended.
 
 Logged by `controller.py` in `_on_change`.  The humidity sensor is tracked
-alongside the temperature sensor, purely for this log line; tracking it has no
-effect on control decisions.
+alongside the temperature sensor, and — in rooms with fans — evaluated the same
+way.
 
 ### Profile events (CC-L3)
 
@@ -139,7 +141,8 @@ log is emitted for those transitions.
   needing engine internals.
 
   The `trigger:` reason identifies what caused this evaluation: a temperature
-  change (`temperature <old>→<new>°F`), a window transition
+  change (`temperature <old>→<new>°F`), a humidity change
+  (`humidity <old>→<new>%`), a window transition
   (`window <entity_id> opened|closed`), another tracked entity changing
   (`<entity_id> changed` — covers toggles/numbers, e.g. a CC-L4 toggle flip or
   CC-L8 number edit), or `startup` (the initial evaluation run when the
@@ -155,13 +158,18 @@ matches what was actually sent, even when an earlier command in the sequence
 threshold context lists the room temperature and the target/medium/high
 thresholds for each device type the room actually has — the same data the
 troubleshooting scenarios in issue #14 need (e.g. "does the fan have the right
-thresholds?").
+thresholds?"). When the room has humidity control (CC-28) and a readable
+humidity reading, the context also carries the room humidity and its
+target/medium/high thresholds in %, e.g.
+`humidity 68% target 60% (med 65% high 70%)`.
 
 ### Room target/offset edits (CC-L8)
 
 - **CC-L8** When a room's target temperature or medium/high offset number changes:
-  `[room=<key>] <name> → <N>°F`
-  e.g. `[room=office] Cooling target → 72°F`.
+  `[room=<key>] <name> → <N><unit>`
+  e.g. `[room=office] Cooling target → 72°F`. The room's humidity numbers
+  (CC-28) log the same way with their `%` unit, e.g.
+  `[room=office] Humidity target → 60%`.
 
 Logged by `number.py` in `RoomNumber.async_set_native_value`, at **INFO** on
 the `…btoddb_room_climate_controller.settings` logger, only when the value actually

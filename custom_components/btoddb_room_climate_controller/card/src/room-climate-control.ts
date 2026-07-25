@@ -9,8 +9,10 @@ import {
 import {
   buildDeviceSettingsFields,
   buildFanSettingsFields,
+  buildHumiditySettingsFields,
   renderDeviceSettingsSection,
   renderFanSettingsSection,
+  renderHumiditySettingsSection,
   renderRoomSettingsSection,
 } from "./settings-ui";
 import { GraphOverlay } from "./graph-overlay";
@@ -421,6 +423,7 @@ export class RoomClimateControl extends LitElement {
     if (!this._config) return nothing;
     const deviceSections = buildDeviceSettingsFields(this._config);
     const fanFields = buildFanSettingsFields(this._config);
+    const humidityFields = buildHumiditySettingsFields(this._config);
     return html`
       <ha-dialog
         open
@@ -434,6 +437,9 @@ export class RoomClimateControl extends LitElement {
             renderDeviceSettingsSection(this.hass, fields)
           )}
           ${fanFields ? renderFanSettingsSection(this.hass, fanFields) : nothing}
+          ${humidityFields
+            ? renderHumiditySettingsSection(this.hass, humidityFields)
+            : nothing}
         </div>
       </ha-dialog>
     `;

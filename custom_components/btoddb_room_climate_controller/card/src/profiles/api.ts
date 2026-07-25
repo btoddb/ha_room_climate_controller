@@ -66,6 +66,14 @@ export interface WsFanOffsets {
   high_offset: string | null;
 }
 
+/** Room-level humidity target + shared medium/high offsets driving the room's
+fans (CC-28); null unless the room has a humidity sensor and a fan. */
+export interface WsHumidityControl {
+  target: string | null;
+  medium_offset: string | null;
+  high_offset: string | null;
+}
+
 export interface WsRoom {
   key: string;
   label: string;
@@ -89,6 +97,8 @@ export interface WsRoom {
     fans: WsFanEntity[];
     /** Shared medium/high offsets for the room's fans, or null when no fan. */
     fan_offsets: WsFanOffsets | null;
+    /** Humidity target/offsets, or null when the room has no humidity control. */
+    humidity_control: WsHumidityControl | null;
     window_sensors: string[];
     /** Only "cooling"/"heating" now — the "fan" key moved to `fans`. */
     live: Record<string, WsRoomLive>;
