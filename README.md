@@ -9,7 +9,9 @@ it ships and auto-registers.
 - Daily **profiles**: named, scheduled per-room presets (use toggles, fan override,
   target temps) created and edited from the card.
 - Native entities, HA areas, abstraction sensors (room temp/humidity/power + a
-  hub-level Outdoor Temperature), and plotly energy/history graphs.
+  hub-level Outdoor Temperature), and plotly energy/history graphs. A room's
+  **humidity** can also drive its fans — set a humidity target (%) plus
+  medium/high offsets and the fans run when the room is too damp.
 
 See [custom_components/btoddb_room_climate_controller/README.md](custom_components/btoddb_room_climate_controller/README.md)
 for full details, and [requirements/](requirements/) for the design requirements.

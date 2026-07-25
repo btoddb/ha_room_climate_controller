@@ -23,6 +23,9 @@ from .const import (
     KEY_GRAPH_TIME_RANGE,
     KEY_HEATER_FAN_ONLY,
     KEY_HIGH_OFFSET,
+    KEY_HUMIDITY_HIGH_OFFSET,
+    KEY_HUMIDITY_MEDIUM_OFFSET,
+    KEY_HUMIDITY_TARGET,
     KEY_MANUAL_MODE,
     KEY_MEDIUM_OFFSET,
     KEY_OUTDOOR_TEMPERATURE,
@@ -188,6 +191,17 @@ def _serialize_room(
                     "high_offset": rr(KEY_HIGH_OFFSET[DEVICE_FAN], "number"),
                 }
                 if room.has_fan
+                else None
+            ),
+            # Room-level humidity target/offsets driving the fans (CC-28); only
+            # present when the room has both a humidity sensor and a fan.
+            "humidity_control": (
+                {
+                    "target": rr(KEY_HUMIDITY_TARGET, "number"),
+                    "medium_offset": rr(KEY_HUMIDITY_MEDIUM_OFFSET, "number"),
+                    "high_offset": rr(KEY_HUMIDITY_HIGH_OFFSET, "number"),
+                }
+                if room.has_fan and room.humidity_sensor
                 else None
             ),
             # Optional window contacts the card reads directly from hass.states to

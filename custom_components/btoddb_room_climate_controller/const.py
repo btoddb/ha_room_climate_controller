@@ -125,6 +125,17 @@ DEFAULT_HIGH_OFFSET: Final = 6
 
 TEMP_UNIT: Final = "°F"
 
+# Humidity target + fan speed offset bounds (%RH above target that bump speed
+# low→med→high). Only used when a room has both a humidity sensor and a fan.
+HUMIDITY_UNIT: Final = "%"
+HUMIDITY_TARGET_MIN: Final = 30
+HUMIDITY_TARGET_MAX: Final = 90
+DEFAULT_HUMIDITY_TARGET: Final = 60
+HUMIDITY_OFFSET_MIN: Final = 1
+HUMIDITY_OFFSET_MAX: Final = 30
+DEFAULT_HUMIDITY_MEDIUM_OFFSET: Final = 5
+DEFAULT_HUMIDITY_HIGH_OFFSET: Final = 10
+
 # --- Room entity keys (unique_id / object_id suffixes) ----------------------
 # Shared by entity creation and the controller's entity-registry resolution.
 KEY_TARGET: Final = {
@@ -147,6 +158,9 @@ KEY_USE: Final = {
     DEVICE_HEATING: "use_heater",
     DEVICE_FAN: "use_fan",
 }
+KEY_HUMIDITY_TARGET: Final = "humidity_target"
+KEY_HUMIDITY_MEDIUM_OFFSET: Final = "humidity_medium_offset"
+KEY_HUMIDITY_HIGH_OFFSET: Final = "humidity_high_offset"
 KEY_MANUAL_MODE: Final = "manual_mode"
 KEY_AC_FAN_ONLY: Final = "ac_fan_only_override"
 KEY_HEATER_FAN_ONLY: Final = "heater_fan_only_override"

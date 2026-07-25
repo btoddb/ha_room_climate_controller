@@ -37,8 +37,9 @@ hand-edit the generated `www/` bundle.
 
 ## Settings dialog
 
-- **UX-12** Shows room temp + humidity, and per device a section with **target temp**, **medium offset**, and **high offset** (target as an input field; offsets as sliders). In the **Fan** section there is one **target temp** input **per fan** (each with its own Reverse — UX-28), but a **single shared** Medium/High offset slider pair for all of the room's fans (CC-14).
+- **UX-12** Shows room temp + humidity, and per device a section with **target temp**, **medium offset**, and **high offset** (target as an input field; offsets as sliders). In the **Fan** section there is one **target temp** input **per fan** (each with its own Reverse — UX-28), but a **single shared** Medium/High offset slider pair for all of the room's fans (CC-14). A room with humidity control also gets a **Humidity** section after the Fan section (UX-31).
 - **UX-28** In the Fan section, **each fan** shows a **Reverse** toggle **only when that fan is reversible** (CC-22 auto-detection, surfaced per fan as `fan_reversible` in `rooms/list`). It behaves like every other toggle (standard entity toggle, immediate service call).
+- **UX-31** When a room has humidity control (CC-28: humidity sensor + at least one fan), the settings dialog shows a **Humidity** section after the Fan section: a target input and Medium/High offset sliders, all displaying the **%** unit, with the same computed "→ N%" threshold previews as the temperature sections. Rooms without humidity control never show the section.
 ## Energy dialog
 
 - **UX-14** A graph of the room's energy use (watts).
@@ -46,6 +47,7 @@ hand-edit the generated `www/` bundle.
 ## History dialog
 
 - **UX-15** A graph of when devices were actually **on**, plus current room temperature and outdoor temperature. "On" means the A/C/heater is actually heating/cooling — **fan-only counts as off** for this graph. No top margin.
+- **UX-32** When a room has a humidity sensor, the History graph adds a **humidity trace** (legend `Humidity: N %`, whole-percent hover) plotted against the temperature axis, whose title becomes `°F / %`; the axis range grows to include the humidity values (UX-18). Rooms without a humidity sensor render the graph unchanged.
 
 ## Graphs (Energy & History)
 

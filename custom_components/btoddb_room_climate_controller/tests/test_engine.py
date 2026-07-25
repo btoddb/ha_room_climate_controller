@@ -36,6 +36,7 @@ engine = _load("engine")
 
 from rc_pure.engine import (  # noqa: E402
     ClimateInfo,
+    Delay,
     EngineInputs,
     FanControl,
     FanInfo,
@@ -1328,3 +1329,261 @@ def test_fans_are_independent_turning_one_use_off():
         and c.entity_id == "fan.off"
         for c in cmds
     )
+
+
+# --- humidity as an independent fan trigger (CC-28..CC-31) ------------------
+# Room humidity target is 50 %RH throughout, with the shared offsets giving
+# medium at 55 %RH and high at 60 %RH. The fan's own temperature target stays
+# at the _fan_control default (72 / 75 / 78 °F), so the two triggers can be
+# driven independently.
+_HUM_TARGET = 50.0
+
+
+def _hum_base(**kw):
+    """Build ``_base()`` inputs with the room-level humidity trigger configured."""
+    defaults = dict(
+        humidity_target=_HUM_TARGET,
+        humidity_medium=_HUM_TARGET + 5.0,
+        humidity_high=_HUM_TARGET + 10.0,
+    )
+    defaults.update(kw)
+    return _base(**defaults)
+
+
+def _hum_fan(*, is_on=False, preset="low", use=True):
+    """Build a low/medium/high preset fan, optionally running at ``preset``."""
+    return _fan_control(
+        "fan.tower",
+        use=use,
+        is_on=is_on,
+        preset_mode=preset if is_on else None,
+        percentage={"low": 10, "medium": 50, "high": 100}[preset] if is_on else 0,
+        preset_modes=("low", "medium", "high"),
+    )
+
+
+def test_humidity_never_affects_climate_or_companion_fans():
+    """CC-28: humidity drives standalone fans only — never climate or its fan."""
+    conditioning = dict(
+        ac=_climate(fan_modes=()),
+        ac_fan=FanInfo(
+            "fan.companion",
+            is_on=False,
+            preset_mode=None,
+            percentage=0,
+            preset_modes=(),
+        ),
+        use_ac=True,
+        room_temp=80.0,  # well past the cooling target, so commands are produced
+    )
+    dry = compute_commands(_base(**conditioning))
+    # Same room, soaked: a full humidity trigger and no standalone fan to drive.
+    humid = compute_commands(_hum_base(**conditioning, room_humidity=95.0))
+
+    assert dry, "the inputs must actually command the A/C for this to prove anything"
+    assert humid == dry
+
+
+def test_humidity_unconfigured_matches_temperature_only():
+    """CC-28: with no humidity inputs the fan behaves exactly as before."""
+
+    def run(room_temp, fan, **kw):
+        return compute_commands(_base(fans=(fan,), room_temp=room_temp, **kw))
+
+    nulls = dict(
+        room_humidity=None,
+        humidity_target=None,
+        humidity_medium=None,
+        humidity_high=None,
+    )
+    # Starts on temperature alone, at the temperature tier.
+    started = run(76.0, _hum_fan())
+    assert started == run(76.0, _hum_fan(), **nulls)
+    assert _types(started) == ["FanTurnOn", "Delay", "FanSetPreset"]
+    assert started[2].preset_mode == "medium"
+
+    # Stops on temperature alone (CC-27 deadband) with no humidity to hold it on.
+    stopped = run(72.1, _hum_fan(is_on=True))
+    assert stopped == run(72.1, _hum_fan(is_on=True), **nulls)
+    assert stopped == [FanTurnOff("fan.tower")]
+
+
+def test_humidity_partially_configured_is_ignored():
+    """CC-28: a humidity reading without thresholds (or vice versa) is ignored."""
+    # Very humid, but no target/thresholds resolved -> temperature decides.
+    cmds = compute_commands(
+        _base(fans=(_hum_fan(is_on=True),), room_temp=72.1, room_humidity=90.0)
+    )
+    assert cmds == [FanTurnOff("fan.tower")]
+
+    # Thresholds configured but no reading (sensor unavailable) -> same.
+    cmds_no_reading = compute_commands(
+        _hum_base(fans=(_hum_fan(is_on=True),), room_temp=72.1, room_humidity=None)
+    )
+    assert cmds_no_reading == [FanTurnOff("fan.tower")]
+
+
+def test_humidity_starts_fan_when_temperature_declines():
+    """CC-29/CC-30: humidity alone starts the fan at its restart threshold."""
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(),),
+            room_temp=72.0,  # at the fan's target: temperature declines
+            room_humidity=_HUM_TARGET + 2.0,  # 52.0: humidity restart threshold
+        )
+    )
+    assert cmds == [
+        FanTurnOn("fan.tower"),
+        Delay(2000),
+        # cooling_speed(52, 55, 60) -> "low" (as does the 72 °F temperature tier)
+        FanSetPreset("fan.tower", "low"),
+    ]
+
+
+def test_humidity_below_restart_threshold_keeps_fan_off():
+    """CC-30: an off fan does not restart until humidity is 2 %RH past target."""
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(),),
+            room_temp=72.0,
+            room_humidity=_HUM_TARGET + 1.9,  # 51.9: just short of the threshold
+        )
+    )
+    assert cmds == []
+
+
+def test_humidity_keeps_running_fan_on_until_half_a_point():
+    """CC-30: a running fan holds until humidity is within 0.5 %RH of target."""
+    fan_running = dict(fans=(_hum_fan(is_on=True),), room_temp=68.0)
+
+    # 50.6 > 50.5 -> humidity still wants the fan on, temperature does not.
+    cmds = compute_commands(_hum_base(**fan_running, room_humidity=_HUM_TARGET + 0.6))
+    assert cmds == []
+
+    # 50.5 is within the deadband -> both triggers decline, fan stops.
+    cmds_off = compute_commands(
+        _hum_base(**fan_running, room_humidity=_HUM_TARGET + 0.5)
+    )
+    assert cmds_off == [FanTurnOff("fan.tower")]
+
+
+def test_temperature_keeps_fan_on_when_humidity_declines():
+    """CC-29: either trigger alone keeps a running fan on — temperature here."""
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True),),
+            room_temp=72.5,  # > 72 + 0.2: temperature still wants the fan
+            room_humidity=_HUM_TARGET + 0.4,  # humidity declines
+        )
+    )
+    assert cmds == []
+
+
+def test_humidity_keeps_fan_on_when_temperature_declines():
+    """CC-29: either trigger alone keeps a running fan on — humidity here."""
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True),),
+            room_temp=72.1,  # within the CC-27 deadband: temperature declines
+            room_humidity=_HUM_TARGET + 0.6,  # humidity still wants the fan
+        )
+    )
+    assert cmds == []
+
+
+def test_fan_stops_only_when_both_triggers_decline():
+    """CC-29: the fan turns off only when temperature *and* humidity decline."""
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True),),
+            room_temp=72.1,
+            room_humidity=_HUM_TARGET + 0.4,
+        )
+    )
+    assert cmds == [FanTurnOff("fan.tower")]
+
+
+def test_fan_speed_is_the_faster_of_the_two_triggers():
+    """CC-29: speed is the higher tier of the temperature and humidity ladders."""
+    # Humidity wins: temperature is medium (76 °F), humidity is high (60 %RH).
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True, preset="medium"),),
+            room_temp=76.0,
+            room_humidity=_HUM_TARGET + 10.0,
+        )
+    )
+    assert cmds == [FanSetPreset("fan.tower", "high")]
+
+    # Temperature wins: humidity is low (50.6 %RH), temperature is high (78 °F).
+    cmds_temp = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True, preset="medium"),),
+            room_temp=78.0,
+            room_humidity=_HUM_TARGET + 0.6,
+        )
+    )
+    assert cmds_temp == [FanSetPreset("fan.tower", "high")]
+
+
+def test_humidity_speed_tiers_truncate():
+    """CC-5: humidity tiers truncate too — 64.9 %RH is not yet the 65 %RH tier."""
+    thresholds = dict(humidity_target=55.0, humidity_medium=60.0, humidity_high=65.0)
+    running_medium = dict(
+        fans=(_hum_fan(is_on=True, preset="medium"),),
+        room_temp=68.0,  # low temperature tier, so humidity drives the speed
+    )
+    cmds = compute_commands(_base(**running_medium, room_humidity=64.9, **thresholds))
+    assert cmds == []
+
+    cmds_high = compute_commands(
+        _base(**running_medium, room_humidity=65.0, **thresholds)
+    )
+    assert cmds_high == [FanSetPreset("fan.tower", "high")]
+
+
+def test_running_fan_is_held_by_temperature_band_after_humidity_declines():
+    """CC-29: a running fan keeps running while the temperature trigger holds it."""
+    # Humidity has fallen away, but the room is still in the temperature
+    # keep-running band (72.2 < 72.5 < 73.0), so the fan stays on.
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True),),
+            room_temp=72.5,
+            room_humidity=_HUM_TARGET + 0.4,
+        )
+    )
+    assert cmds == []
+
+    # Once the room also falls inside the CC-27 deadband, nothing holds it on.
+    cmds_off = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True),),
+            room_temp=72.2,
+            room_humidity=_HUM_TARGET + 0.4,
+        )
+    )
+    assert cmds_off == [FanTurnOff("fan.tower")]
+
+
+def test_humidity_does_not_run_a_fan_whose_use_is_off():
+    """CC-13/CC-29: the fan's Use toggle still gates both triggers."""
+    cmds = compute_commands(
+        _hum_base(
+            fans=(_hum_fan(is_on=True, use=False),),
+            room_temp=68.0,
+            room_humidity=90.0,
+        )
+    )
+    assert cmds == [FanTurnOff("fan.tower")]
+
+
+def test_humidity_restart_cycle():
+    """CC-30: an off fan restarts only once humidity reaches target + 2 %RH."""
+    idle = dict(fans=(_hum_fan(),), room_temp=72.5)  # below the 73.0 temp restart
+
+    cmds_idle = compute_commands(_hum_base(**idle, room_humidity=51.9))
+    assert cmds_idle == []
+
+    cmds_on = compute_commands(_hum_base(**idle, room_humidity=52.0))
+    assert cmds_on[0] == FanTurnOn("fan.tower")

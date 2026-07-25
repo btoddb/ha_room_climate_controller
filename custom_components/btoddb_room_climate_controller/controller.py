@@ -13,11 +13,17 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 from .const import (
+    DEFAULT_HUMIDITY_HIGH_OFFSET,
+    DEFAULT_HUMIDITY_MEDIUM_OFFSET,
+    DEFAULT_HUMIDITY_TARGET,
     DEVICE_FAN,
     DOMAIN,
     KEY_AC_FAN_ONLY,
     KEY_HEATER_FAN_ONLY,
     KEY_HIGH_OFFSET,
+    KEY_HUMIDITY_HIGH_OFFSET,
+    KEY_HUMIDITY_MEDIUM_OFFSET,
+    KEY_HUMIDITY_TARGET,
     KEY_MANUAL_MODE,
     KEY_MEDIUM_OFFSET,
     KEY_TARGET,
@@ -212,6 +218,17 @@ def _threshold_context(room: Room, inputs: EngineInputs) -> str:
         f"(med {int(fan.medium)}°F high {int(fan.high)}°F)"
         for fan in inputs.fans
     )
+    if (
+        inputs.room_humidity is not None
+        and inputs.humidity_target is not None
+        and inputs.humidity_medium is not None
+        and inputs.humidity_high is not None
+    ):
+        parts.append(
+            f"humidity {int(inputs.room_humidity)}% "
+            f"target {int(inputs.humidity_target)}% "
+            f"(med {int(inputs.humidity_medium)}% high {int(inputs.humidity_high)}%)"
+        )
     return "; ".join(parts)
 
 
@@ -335,9 +352,20 @@ class RoomController:
                 if eid := self._resolve(key, domain):
                     ids.add(eid)
         if self.room.has_fan:
+            # The humidity numbers exist only when the room also reports humidity.
+            humidity_keys: tuple[tuple[str, str], ...] = (
+                (
+                    (KEY_HUMIDITY_TARGET, "number"),
+                    (KEY_HUMIDITY_MEDIUM_OFFSET, "number"),
+                    (KEY_HUMIDITY_HIGH_OFFSET, "number"),
+                )
+                if self.room.humidity_sensor
+                else ()
+            )
             fan_keys: list[tuple[str, str]] = [
                 (KEY_MEDIUM_OFFSET["fan"], "number"),
                 (KEY_HIGH_OFFSET["fan"], "number"),
+                *humidity_keys,
             ]
             for fan_eid in self.room.fan_entities:
                 slug = fan_slug(fan_eid)
@@ -367,20 +395,6 @@ class RoomController:
         old_val = old.state if old else None
         new_val = new.state if new else None
         changed = old_val != new_val
-        if entity_id == self.room.humidity_sensor:
-            # CC-L2: humidity must never command a device — the engine ignores
-            # humidity entirely, so short-circuit unconditionally (regardless of
-            # ``changed``) rather than resubscribing/requesting a run that could
-            # flush an owed command from an unrelated change. Only log when the
-            # value actually moved.
-            if changed:
-                _SENSOR_LOGGER.info(
-                    "[room=%s] Humidity changed: %s → %s%%",
-                    self.room.key,
-                    old_val,
-                    new_val,
-                )
-            return
         trigger = f"{entity_id} changed"
         if changed and entity_id == self.room.temperature_sensor:
             _SENSOR_LOGGER.info(
@@ -390,6 +404,20 @@ class RoomController:
                 new_val,
             )
             trigger = f"temperature {old_val}→{new_val}°F"
+        elif entity_id == self.room.humidity_sensor:
+            if changed:
+                _SENSOR_LOGGER.info(
+                    "[room=%s] Humidity changed: %s → %s%%",
+                    self.room.key,
+                    old_val,
+                    new_val,
+                )
+                trigger = f"humidity {old_val}→{new_val}%"
+            if not self.room.has_fan:
+                # Humidity is inert without fans (CC-28): the evaluation could
+                # not change anything, and requesting one would cancel a run
+                # already in flight.
+                return
         elif changed and entity_id in self.room.window_sensors:
             state_label = "opened" if new_val == "on" else "closed"
             _SENSOR_LOGGER.info(
@@ -529,6 +557,23 @@ class RoomController:
                 )
             )
 
+        # Humidity fan trigger: only meaningful when the room has both a
+        # humidity sensor and a fan. Offsets are resolved into absolute %RH
+        # thresholds here, matching how the temperature tiers are passed.
+        room_humidity = humidity_target = humidity_medium = humidity_high = None
+        if room.has_fan and room.humidity_sensor:
+            room_humidity = self._humidity()
+            if room_humidity is not None:
+                humidity_target = self._number(
+                    KEY_HUMIDITY_TARGET, float(DEFAULT_HUMIDITY_TARGET)
+                )
+                humidity_medium = humidity_target + self._number(
+                    KEY_HUMIDITY_MEDIUM_OFFSET, float(DEFAULT_HUMIDITY_MEDIUM_OFFSET)
+                )
+                humidity_high = humidity_target + self._number(
+                    KEY_HUMIDITY_HIGH_OFFSET, float(DEFAULT_HUMIDITY_HIGH_OFFSET)
+                )
+
         return EngineInputs(
             combined=room.combined,
             room_temp=room_temp,
@@ -558,6 +603,10 @@ class RoomController:
             command_delay_ms=int(room.command_delay * 1000),
             power_on_delay_ms=int(room.power_on_delay * 1000),
             window_open=self._window_open(),
+            room_humidity=room_humidity,
+            humidity_target=humidity_target,
+            humidity_medium=humidity_medium,
+            humidity_high=humidity_high,
         )
 
     # -- state readers -------------------------------------------------------
@@ -570,6 +619,17 @@ class RoomController:
         if not self.room.temperature_sensor:
             return None
         state = self.hass.states.get(self.room.temperature_sensor)
+        if state is None or state.state in _INVALID:
+            return None
+        try:
+            return float(state.state)
+        except TypeError, ValueError:
+            return None
+
+    def _humidity(self) -> float | None:
+        if not self.room.humidity_sensor:
+            return None
+        state = self.hass.states.get(self.room.humidity_sensor)
         if state is None or state.state in _INVALID:
             return None
         try:

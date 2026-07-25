@@ -97,6 +97,7 @@ export function buildHistoryGraphConfig(
   hours: number
 ): Record<string, unknown> {
   const outdoor = config.outdoor_sensor || DEFAULT_OUTDOOR_SENSOR;
+  const humidity = config.humidity_sensor?.trim() ? config.humidity_sensor : null;
   const entities: Record<string, unknown>[] = [
     {
       entity: config.temp_sensor,
@@ -114,14 +115,42 @@ export function buildHistoryGraphConfig(
       yaxis: "y",
       line: { color: "rgb(255,165,0)", width: 2 },
     },
-    {
-      entity: outdoor,
+  ];
+
+  // Humidity rides the temperature axis (%RH lands in the same numeric range),
+  // and must be pushed before Outdoor: the outdoor filter folds every earlier
+  // trace's stashed values into the shared axis range (UX-18/UX-32).
+  if (humidity) {
+    entities.push({
+      entity: humidity,
       filters: [
         "force_numeric",
         {
           fn: `({ xs, ys, vars }) => {
+            vars._humidityVals = ys.map(Number).filter((n) => !isNaN(n));
+            return { xs, ys };
+          }`,
+        },
+      ],
+      name: "$ex 'Humidity: ' + (ys.at(-1) != null ? ys.at(-1).toFixed(0) + ' %' : '—')",
+      hovertemplate: "%{x|%H:%M}: %{y:.0f} %<extra></extra>",
+      yaxis: "y",
+      line: { color: "rgb(0,190,230)", width: 2, dash: "dot" },
+    });
+  }
+
+  entities.push({
+    entity: outdoor,
+    filters: [
+      "force_numeric",
+      {
+        fn: `({ xs, ys, vars }) => {
             const outdoor = ys.map(Number).filter((n) => !isNaN(n));
-            const all = [...(vars._roomTempVals || []), ...outdoor];
+            const all = [
+              ...(vars._roomTempVals || []),
+              ...(vars._humidityVals || []),
+              ...outdoor,
+            ];
             if (all.length) {
               const dmin = Math.min(...all);
               const dmax = Math.max(...all);
@@ -131,14 +160,13 @@ export function buildHistoryGraphConfig(
             }
             return { xs, ys };
           }`,
-        },
-      ],
-      name: "$ex 'Outdoor: ' + (ys.at(-1) != null ? ys.at(-1).toFixed(1) + ' °F' : '—')",
-      hovertemplate: "%{x|%H:%M}: %{y:.1f} °F<extra></extra>",
-      yaxis: "y",
-      line: { color: "rgb(100,180,255)", width: 2 },
-    },
-  ];
+      },
+    ],
+    name: "$ex 'Outdoor: ' + (ys.at(-1) != null ? ys.at(-1).toFixed(1) + ' °F' : '—')",
+    hovertemplate: "%{x|%H:%M}: %{y:.1f} °F<extra></extra>",
+    yaxis: "y",
+    line: { color: "rgb(100,180,255)", width: 2 },
+  });
 
   const ac = deviceTrace(config.ac_entity, "Cooling", "rgb(30,144,255)", "cooling");
   const heat = deviceTrace(config.heater_entity, "Heating", "rgb(220,60,60)", "heating");
@@ -177,7 +205,7 @@ export function buildHistoryGraphConfig(
       },
       margin: { t: 0, r: 60 },
       yaxis: {
-        title: "°F",
+        title: humidity ? "°F / %" : "°F",
         showgrid: false,
         zeroline: false,
         range: "$ex vars.tempYRange || [20, 100]",

@@ -59,6 +59,11 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   /** Shared medium/high fan-speed offsets for all the room's fans. */
   fan_medium_offset: string;
   fan_high_offset: string;
+  /** Room-level humidity target + shared offsets (CC-28); empty when the room
+  has no humidity control. */
+  humidity_target: string;
+  humidity_medium_offset: string;
+  humidity_high_offset: string;
   outdoor_sensor?: string;
   time_range?: string;
   /** Room key for climate profiles (e.g. todds_bedroom). Inferred from manual_mode if omitted. */
@@ -91,6 +96,9 @@ export function defaultConfig(
     heating_high_offset: "",
     fan_medium_offset: "",
     fan_high_offset: "",
+    humidity_target: "",
+    humidity_medium_offset: "",
+    humidity_high_offset: "",
     outdoor_sensor: DEFAULT_OUTDOOR_SENSOR,
     time_range: DEFAULT_TIME_RANGE,
     ...partial,

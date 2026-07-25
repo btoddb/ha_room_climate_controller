@@ -115,14 +115,13 @@ def test_describe_command_falls_back_to_entity_id_for_unknown_entity():
     assert _describe_command(cmd, room) == "climate.some_other_device → cool"
 
 
-def test_threshold_context_only_lists_devices_the_room_has():
-    room = _room(has_ac=True, has_heater=False, has_fan=True)
-    inputs = EngineInputs(
-        combined=False,
-        room_temp=78.0,
-        ac=None,
-        heater=None,
-        fans=(
+def _inputs(**overrides):
+    defaults = {
+        "combined": False,
+        "room_temp": 78.0,
+        "ac": None,
+        "heater": None,
+        "fans": (
             FanControl(
                 info=FanInfo(
                     "fan.office",
@@ -138,25 +137,45 @@ def test_threshold_context_only_lists_devices_the_room_has():
                 reverse=False,
             ),
         ),
-        ac_fan=None,
-        heater_fan=None,
-        ac_power=None,
-        heater_power=None,
-        use_ac=True,
-        use_heater=False,
-        ac_fan_only_override=False,
-        heater_fan_only_override=False,
-        target_cooling=72.0,
-        cooling_medium=75.0,
-        cooling_high=78.0,
-        target_heating=68.0,
-        heating_medium=65.0,
-        heating_high=62.0,
-        command_delay_ms=1000,
-        power_on_delay_ms=2000,
-    )
-    context = _threshold_context(room, inputs)
+        "ac_fan": None,
+        "heater_fan": None,
+        "ac_power": None,
+        "heater_power": None,
+        "use_ac": True,
+        "use_heater": False,
+        "ac_fan_only_override": False,
+        "heater_fan_only_override": False,
+        "target_cooling": 72.0,
+        "cooling_medium": 75.0,
+        "cooling_high": 78.0,
+        "target_heating": 68.0,
+        "heating_medium": 65.0,
+        "heating_high": 62.0,
+        "command_delay_ms": 1000,
+        "power_on_delay_ms": 2000,
+    }
+    defaults.update(overrides)
+    return EngineInputs(**defaults)
+
+
+def test_threshold_context_only_lists_devices_the_room_has():
+    room = _room(has_ac=True, has_heater=False, has_fan=True)
+    context = _threshold_context(room, _inputs())
     assert "temp 78°F" in context
     assert "cooling target 72°F" in context
     assert "fan office target 72°F" in context
     assert "heating target" not in context
+    assert "humidity" not in context
+
+
+def test_threshold_context_includes_humidity_when_present():
+    """CC-L7: a room with a humidity trigger reports its %RH thresholds."""
+    room = _room(has_ac=True, has_heater=False, has_fan=True)
+    inputs = _inputs(
+        room_humidity=55.0,
+        humidity_target=60.0,
+        humidity_medium=65.0,
+        humidity_high=70.0,
+    )
+    context = _threshold_context(room, inputs)
+    assert "humidity 55% target 60% (med 65% high 70%)" in context

@@ -34,9 +34,13 @@ _OFF_LIKE = frozenset({"off", "unavailable", "unknown", "none", "", None})
 # within HYSTERESIS_OFF of the target; once stopped it does not restart until
 # the room passes the next whole degree past the target. The device's reported
 # running mode (COOL/HEAT/fan on) is the hysteresis state — the engine stays
-# stateless. Setpoints and fan-speed tiers still truncate (CC-5).
+# stateless. Setpoints and fan-speed tiers still truncate (CC-5). The humidity
+# fan trigger (CC-30) uses the same shape with its own wider %RH band.
 HYSTERESIS_OFF: Final = 0.2
 HYSTERESIS_ON: Final = 1.0
+
+HUMIDITY_HYSTERESIS_OFF: Final = 0.5
+HUMIDITY_HYSTERESIS_ON: Final = 2.0
 
 MAX_PERCENTAGE: Final = 100.0
 
@@ -46,6 +50,17 @@ def _wants_cool(room: float, target: float, running: bool) -> bool:  # noqa: FBT
     if running:
         return room > target + HYSTERESIS_OFF
     return room >= target + HYSTERESIS_ON
+
+
+def _wants_fan_for_humidity(
+    humidity: float,
+    target: float,
+    running: bool,  # noqa: FBT001
+) -> bool:
+    """Humidity hysteresis (CC-30): cooling-style, wider band for noisy %RH."""
+    if running:
+        return humidity > target + HUMIDITY_HYSTERESIS_OFF
+    return humidity >= target + HUMIDITY_HYSTERESIS_ON
 
 
 def _wants_heat(room: float, target: float, running: bool) -> bool:  # noqa: FBT001
@@ -201,6 +216,12 @@ class EngineInputs:
     # window sensor: True when the room's window is open. Suppresses active
     # cooling/heating (Cool/Heat) only — fan-only circulation is unaffected.
     window_open: bool = False
+    # Room-level humidity trigger (standalone fans only). All None ⇒ ignored
+    # (no humidity sensor, sensor unreadable, or room has no fans).
+    room_humidity: float | None = None
+    humidity_target: float | None = None
+    humidity_medium: float | None = None  # absolute: target + medium offset
+    humidity_high: float | None = None  # absolute: target + high offset
 
     # derived helpers ----------------------------------------------------
     @property
@@ -647,14 +668,34 @@ def _same_fan_speed(reported: int, target: int, step: float) -> bool:
 def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
     info = fan.info
     # CC-13/CC-27: run when Use fan on and past the fan threshold (cooling-style
-    # hysteresis keyed on the fan's own reported on/off state).
-    needs_on = fan.use and _wants_cool(inp.room_temp, fan.target, info.is_on)
+    # hysteresis keyed on the fan's own reported on/off state). CC-28/CC-29:
+    # room humidity is an independent trigger — the fan runs when *either*
+    # trigger wants it on, and stops only when both decline. The humidity
+    # trigger is inactive unless a reading and all its thresholds resolved.
+    temp_wants = _wants_cool(inp.room_temp, fan.target, info.is_on)
+    hum_active = (
+        inp.room_humidity is not None
+        and inp.humidity_target is not None
+        and inp.humidity_medium is not None
+        and inp.humidity_high is not None
+    )
+    hum_wants = hum_active and _wants_fan_for_humidity(
+        inp.room_humidity, inp.humidity_target, info.is_on
+    )
+    needs_on = fan.use and (temp_wants or hum_wants)
     if not needs_on:
         if info.is_on:
             out.add(FanTurnOff(info.entity_id))
         return
     # CC-14: speed follows the cooling-style tiers against this fan's thresholds.
+    # CC-29: with humidity active the faster of the two ladders wins.
     label, percent = cooling_speed(inp.room_temp, fan.medium, fan.high)
+    if hum_active:
+        h_label, h_percent = cooling_speed(
+            inp.room_humidity, inp.humidity_medium, inp.humidity_high
+        )
+        if h_percent > percent:
+            label, percent = h_label, h_percent
     if not info.is_on:
         out.add(FanTurnOn(info.entity_id), Delay(inp.command_delay_ms))
     if label in info.preset_modes:
