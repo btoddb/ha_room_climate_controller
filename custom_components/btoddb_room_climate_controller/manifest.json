@@ -18,5 +18,5 @@
     "custom_components.btoddb_room_climate_controller"
   ],
   "requirements": [],
-  "version": "v0.7.0"
+  "version": "v0.7.1"
 }
