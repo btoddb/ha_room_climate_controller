@@ -44,6 +44,15 @@ HUMIDITY_HYSTERESIS_ON: Final = 2.0
 
 MAX_PERCENTAGE: Final = 100.0
 
+# Setpoint dedup (CC-19). The controller remembers the whole-°F value it last
+# commanded to each entity and passes it in as ``last_commanded_setpoint``;
+# the engine itself stays stateless. SETPOINT_TOLERANCE bounds the one
+# situation with no memory to trust: startup / no-memory fallback, where a
+# device's reported echo within less than 1 °F of the desired value counts as
+# converged (absorbs a °C-native device's own whole-°C grid rounding). Once
+# memory is available it is trusted absolutely — see ``_setpoint_needs_send``.
+SETPOINT_TOLERANCE: Final = 1.0
+
 
 def _wants_cool(room: float, target: float, running: bool) -> bool:  # noqa: FBT001
     """Cooling-style hysteresis (CC-27): hold near target, restart a degree past it."""
@@ -104,17 +113,40 @@ def clamp_setpoint(value: int, min_temp: float | None, max_temp: float | None) -
 def _setpoint_needs_send(
     current_setpoint: float | None,
     desired_setpoint: int,
+    last_commanded: int | None,
 ) -> bool:
     """
     Whether a ``SetTemperature`` is needed for the current evaluation (CC-19).
 
-    A device that doesn't report its setpoint (``current_setpoint is None``)
-    can never be confirmed to have converged, so it is always (re)sent —
-    mirroring CC-23's "unknown never matches" convention for fan direction.
-    The controller logs that the device is non-reporting so this is
-    distinguishable from a genuine setpoint mismatch.
+    The engine stays stateless — ``last_commanded`` is memory the controller
+    keeps of the whole-°F value it last successfully commanded to this
+    entity, supplied as input each evaluation.
+
+    With memory available (``last_commanded is not None``), it is trusted
+    **absolutely**: send iff the desired value differs from it
+    (``desired_setpoint != last_commanded``); the reported ``current_setpoint``
+    is not consulted at all. A bounded "drift" re-send was tried and
+    rejected: a device with a coarse enough native grid can echo a
+    commanded value far enough off (e.g. it clamps internally) that any fixed
+    threshold gets crossed on every evaluation, recreating the exact beep
+    loop this dedup exists to prevent. A genuine device-side setpoint change
+    (user remote, device revert) is therefore deliberately **not fought** —
+    it persists until the desired value itself changes, manual mode toggles
+    (which clears memory), or HA restarts (which also clears memory). Manual
+    mode is the sanctioned way to override RCC's setpoint.
+
+    Without memory (fresh start, or after manual mode cleared it): a device
+    that has never reported a setpoint is sent once, unconditionally — memory
+    then takes over on the next evaluation. A reporting device is treated as
+    converged when its echo is less than ``SETPOINT_TOLERANCE`` (1 °F) from
+    desired (absorbing a °C-native device's own whole-°C grid rounding); an
+    echo exactly ``SETPOINT_TOLERANCE`` off is sent.
     """
-    return current_setpoint is None or current_setpoint != desired_setpoint
+    if last_commanded is not None:
+        return desired_setpoint != last_commanded
+    if current_setpoint is None:
+        return True
+    return abs(current_setpoint - desired_setpoint) >= SETPOINT_TOLERANCE
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +165,10 @@ class ClimateInfo:
     supports_set_temp: bool
     current_setpoint: float | None = None
     max_temp: float | None = None
+    # Whole-°F value RCC last successfully commanded to this entity (CC-19),
+    # kept by the controller across evaluations; None when never commanded or
+    # the memory was cleared (e.g. while manual mode is active).
+    last_commanded_setpoint: int | None = None
 
     @property
     def has_fan(self) -> bool:
@@ -458,10 +494,15 @@ def _combined(inp: EngineInputs, out: _Out) -> None:  # noqa: PLR0912
             TurnOffClimate(ac.entity_id),
         )
     desired_setpoint = clamp_setpoint(target, ac.min_temp, ac.max_temp)
+    # CC-32: setpoint is meaningless in fan-only, and devices report
+    # mode-dependent (sometimes degenerate) ranges there — only send it while
+    # actively conditioning.
     if (
-        decision != OFF
+        decision in (COOL, HEAT)
         and ac.supports_set_temp
-        and _setpoint_needs_send(ac.current_setpoint, desired_setpoint)
+        and _setpoint_needs_send(
+            ac.current_setpoint, desired_setpoint, ac.last_commanded_setpoint
+        )
     ):
         out.add(SetTemperature(ac.entity_id, target, decision))
     if inp.ac_power and decision == OFF and inp.ac_power.is_on:
@@ -521,10 +562,15 @@ def _split_ac(inp: EngineInputs, out: _Out) -> None:
             TurnOffClimate(ac.entity_id),
         )
     desired_setpoint = clamp_setpoint(inp.ac_setpoint_int, ac.min_temp, ac.max_temp)
+    # CC-32: setpoint is meaningless in fan-only, and devices report
+    # mode-dependent (sometimes degenerate) ranges there — only send it while
+    # actively conditioning.
     if (
-        decision in (COOL, FAN_ONLY)
+        decision == COOL
         and ac.supports_set_temp
-        and _setpoint_needs_send(ac.current_setpoint, desired_setpoint)
+        and _setpoint_needs_send(
+            ac.current_setpoint, desired_setpoint, ac.last_commanded_setpoint
+        )
     ):
         out.add(SetTemperature(ac.entity_id, inp.ac_setpoint_int, decision))
     if inp.ac_power and decision == OFF and inp.ac_power.is_on:
@@ -586,10 +632,15 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
     desired_setpoint = clamp_setpoint(
         inp.target_heating_int, heater.min_temp, heater.max_temp
     )
+    # CC-32: setpoint is meaningless in fan-only, and devices report
+    # mode-dependent (sometimes degenerate) ranges there — only send it while
+    # actively conditioning.
     if (
-        decision in (HEAT, FAN_ONLY)
+        decision == HEAT
         and heater.supports_set_temp
-        and _setpoint_needs_send(heater.current_setpoint, desired_setpoint)
+        and _setpoint_needs_send(
+            heater.current_setpoint, desired_setpoint, heater.last_commanded_setpoint
+        )
     ):
         out.add(SetTemperature(heater.entity_id, inp.target_heating_int, decision))
     if inp.heater_power and decision == OFF and inp.heater_power.is_on:
