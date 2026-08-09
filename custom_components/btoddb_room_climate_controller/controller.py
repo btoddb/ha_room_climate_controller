@@ -245,6 +245,10 @@ class RoomController:
         self._unsub_state = None
         self._tracked: frozenset[str] = frozenset()
         self._task: asyncio.Task | None = None
+        # Whole-°F value RCC last successfully commanded to each climate
+        # entity (CC-19), keyed by entity_id. Cleared while manual mode is
+        # active, since the user may change device setpoints by hand.
+        self._last_commanded_setpoints: dict[str, int] = {}
 
     # -- lifecycle -----------------------------------------------------------
     @callback
@@ -452,11 +456,6 @@ class RoomController:
                 return replace(cmd, temperature=temperature)
         return cmd
 
-    def _device_reports_setpoint(self, entity_id: str) -> bool:
-        """Whether ``entity_id`` currently reports a ``temperature`` attribute."""
-        state = self.hass.states.get(entity_id)
-        return bool(state) and state.attributes.get("temperature") is not None
-
     # -- evaluation ----------------------------------------------------------
     @callback
     def async_request_run(self, trigger: str = "evaluation") -> None:
@@ -487,6 +486,25 @@ class RoomController:
                 # the CC-L7 description, so the log always matches what was
                 # actually sent.
                 resolved_cmd = self._resolve_command(cmd)
+                # CC-19: a mode-transition snapshot (e.g. fan_only -> cool) can
+                # resolve the engine's desired setpoint against a degenerate
+                # pre-transition range, so the *live-resolved* value can land
+                # back on what memory already has even though the engine's
+                # raw desired value didn't match. Drop it here rather than
+                # re-sending a value the device was already just commanded.
+                if (
+                    isinstance(resolved_cmd, SetTemperature)
+                    and self._last_commanded_setpoints.get(resolved_cmd.entity_id)
+                    == resolved_cmd.temperature
+                ):
+                    _LOGGER.debug(
+                        "Room %s: skipping SetTemperature %s=%s°F "
+                        "(resolved value matches last-commanded memory)",
+                        self.room.key,
+                        resolved_cmd.entity_id,
+                        resolved_cmd.temperature,
+                    )
+                    continue
                 action_descriptions.append(_describe_command(resolved_cmd, self.room))
                 domain, service, data = _service_for(resolved_cmd)
                 # Isolate each call: one device rejecting a command (e.g. a
@@ -506,6 +524,15 @@ class RoomController:
                         service,
                         data,
                     )
+                else:
+                    # CC-19: remember what was actually sent (the live-clamped
+                    # value) so the next evaluation's memory-vs-desired
+                    # compare is self-consistent in steady state. Only on
+                    # success — a failed call must retry next evaluation.
+                    if isinstance(resolved_cmd, SetTemperature):
+                        self._last_commanded_setpoints[resolved_cmd.entity_id] = (
+                            resolved_cmd.temperature
+                        )
             if action_descriptions:
                 _LOGGER.info(
                     "[room=%s] RCC commanded: %s (trigger: %s; %s)",
@@ -525,6 +552,10 @@ class RoomController:
         # Default to manual (dormant) when the state can't be read, so a lost or
         # not-yet-restored switch state never silently re-activates control.
         if self._switch_state(KEY_MANUAL_MODE, default=True):
+            # CC-19: forget commanded setpoints while dormant — the user may
+            # change device setpoints by hand during manual mode, so
+            # re-activation must re-enforce rather than trust stale memory.
+            self._last_commanded_setpoints.clear()
             return None
         room_temp = self._temperature()
         if room_temp is None:
@@ -681,6 +712,7 @@ class RoomController:
             max_temp=attrs.get("max_temp"),
             supports_set_temp=bool(features & 1),
             current_setpoint=float(raw_setpoint) if raw_setpoint is not None else None,
+            last_commanded_setpoint=self._last_commanded_setpoints.get(entity_id),
         )
 
     def _fan_info(self, entity_id: str | None) -> FanInfo | None:

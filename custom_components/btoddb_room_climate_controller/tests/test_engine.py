@@ -133,9 +133,11 @@ def _climate(
     set_temp=True,
     hvac_modes=("off", "cool"),
     current_setpoint=None,
+    last_commanded_setpoint=None,
+    entity_id="climate.ac",
 ):
     return ClimateInfo(
-        entity_id="climate.ac",
+        entity_id=entity_id,
         hvac_mode=hvac,
         fan_mode=fan_mode,
         hvac_modes=hvac_modes,
@@ -144,6 +146,7 @@ def _climate(
         max_temp=max_temp,
         supports_set_temp=set_temp,
         current_setpoint=current_setpoint,
+        last_commanded_setpoint=last_commanded_setpoint,
     )
 
 
@@ -710,43 +713,52 @@ def test_set_temperature_sent_when_setpoint_unknown_and_entering():
     assert any(isinstance(c, SetTemperature) for c in cmds)
 
 
-def test_set_temperature_resent_when_setpoint_unknown_and_steady():
+def test_set_temperature_not_resent_when_unknown_and_memory_matches():
     """
-    CC-19/CC-23 (issue #31 follow-up).
+    CC-19 (revised, issue #31 follow-up + beep regression).
 
-    A device that never reports its setpoint can't be confirmed to have
-    converged, so the engine (re)sends SetTemperature every evaluation —
-    mirroring CC-23's "unknown never matches" convention for fan direction.
-    The controller logs that the device is non-reporting so this expected
-    spam is distinguishable from a genuine setpoint mismatch.
+    A non-reporting device (``current_setpoint`` always ``None``) used to be
+    resent on every evaluation, forever. Now the controller's
+    last-commanded-setpoint memory takes over: once ``last_commanded_setpoint``
+    already equals the desired value, a non-reporting device is trusted and
+    not resent — the old "unknown never matches" always-resend behavior is
+    gone by design.
     """
     cmds = compute_commands(
         _base(
-            ac=_climate(hvac="cool", fan_modes=("low", "high"), current_setpoint=None),
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                current_setpoint=None,
+                last_commanded_setpoint=63,  # matches the clamped desired 63
+            ),
             use_ac=True,
             room_temp=80.0,
         )
     )
-    assert any(isinstance(c, SetTemperature) for c in cmds)
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
 
 
-def test_split_heater_setpoint_resent_when_unknown_and_steady():
-    """Same always-resend behavior as the split A/C case, for the heater."""
+def test_split_heater_setpoint_not_resent_when_unknown_and_memory_matches():
+    """Same revised non-resend behavior as the split A/C case, for the heater."""
     cmds = compute_commands(
         _base(
             heater=_climate(
-                hvac="heat", hvac_modes=("off", "heat"), current_setpoint=None
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                current_setpoint=None,
+                last_commanded_setpoint=68,  # matches target_heating
             ),
             use_heater=True,
             room_temp=60.0,
             target_heating=68.0,
         )
     )
-    assert any(isinstance(c, SetTemperature) for c in cmds)
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
 
 
-def test_combined_setpoint_resent_when_unknown_and_steady():
-    """Same always-resend behavior as the split A/C case, for combined mode."""
+def test_combined_setpoint_not_resent_when_unknown_and_memory_matches():
+    """Same revised non-resend behavior as the split A/C case, for combined mode."""
     cmds = compute_commands(
         _base(
             combined=True,
@@ -754,6 +766,7 @@ def test_combined_setpoint_resent_when_unknown_and_steady():
                 hvac="heat",
                 hvac_modes=("off", "cool", "heat"),
                 current_setpoint=None,
+                last_commanded_setpoint=68,  # matches target_heating
             ),
             use_ac=True,
             use_heater=True,
@@ -761,7 +774,365 @@ def test_combined_setpoint_resent_when_unknown_and_steady():
             target_heating=68.0,
         )
     )
-    assert any(isinstance(c, SetTemperature) for c in cmds)
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
+
+
+def test_setpoint_memory_match_trusts_wide_echo():
+    """
+    CC-19 beep regression, memory design: matching memory trusts a wide echo.
+
+    min_temp=64.0 clamps the desired setpoint to 65 (CC-9's 1° margin).
+    ``last_commanded_setpoint`` already equals that 65, so a round-to-nearest
+    °C echo (65.3) *and* a floor-truncating °C echo (63.4, 1.6 °F off — bigger
+    than the old SETPOINT_TOLERANCE would have allowed) both count as
+    converged: it's the memory match that decides, not how close the echo
+    happens to land. Closes the truncating-device gap a pure tolerance
+    compare couldn't.
+    """
+    cmds = compute_commands(
+        _base(
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                min_temp=64.0,
+                current_setpoint=65.3,
+                last_commanded_setpoint=65,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
+
+    cmds_truncating_echo = compute_commands(
+        _base(
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                min_temp=64.0,
+                current_setpoint=63.4,
+                last_commanded_setpoint=65,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_truncating_echo)
+
+
+def test_setpoint_memory_match_trusted_absolutely_no_drift_resend():
+    """
+    CC-19 (review cycle 2): matching memory is trusted absolutely, no drift resend.
+
+    A bounded drift threshold was tried and rejected: a device with a coarse
+    enough native grid (e.g. one that clamps internally) can echo a
+    commanded value far enough off that any fixed threshold gets crossed on
+    every evaluation, recreating the exact beep loop this dedup exists to
+    prevent. So once memory matches the desired value, the reported echo
+    (however far off — 62.9 is 2.1 °F from the desired 65) is not consulted
+    at all, and no SetTemperature is sent.
+    """
+    cmds = compute_commands(
+        _base(
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                min_temp=64.0,
+                current_setpoint=62.9,
+                last_commanded_setpoint=65,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
+
+
+def test_setpoint_genuine_target_change_always_sends_heat():
+    """
+    CC-19 beep-fix gap 1: a genuine target change must not be swallowed.
+
+    Heating target moves 65 -> 66 °F. ``last_commanded_setpoint`` (65) no
+    longer matches the newly desired value (66), so the change sends exactly
+    once regardless of how close the device's stale echo (65.3) happens to
+    sit to the *old* target — a pure tolerance compare against the echo would
+    have missed this. Covers the HEAT branch of the memory-mismatch path.
+    """
+    cmds = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                entity_id="climate.heater",
+                current_setpoint=65.3,
+                last_commanded_setpoint=65,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=66.0,
+        )
+    )
+    temp_cmds = [c for c in cmds if isinstance(c, SetTemperature)]
+    assert len(temp_cmds) == 1
+    assert temp_cmds[0].temperature == 66
+
+
+def test_setpoint_no_memory_fallback_uses_tolerance():
+    """
+    CC-19: with no memory (fresh start / after manual mode), fall back to tolerance.
+
+    Same clamped-to-65 setup as the memory tests, but with
+    ``last_commanded_setpoint=None`` throughout.
+    """
+    # Echo within SETPOINT_TOLERANCE (1 °F) of desired -> converged.
+    cmds_converged = compute_commands(
+        _base(
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                min_temp=64.0,
+                current_setpoint=65.3,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_converged)
+
+    # Echo >= SETPOINT_TOLERANCE off -> sent.
+    cmds_mismatch = compute_commands(
+        _base(
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                min_temp=64.0,
+                current_setpoint=63.4,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert any(isinstance(c, SetTemperature) for c in cmds_mismatch)
+
+    # Boundary: echo exactly SETPOINT_TOLERANCE (1.0 °F) off -> still sent
+    # (the compare is `>=`, and "converged" requires strictly less than).
+    cmds_boundary = compute_commands(
+        _base(
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                min_temp=64.0,
+                current_setpoint=64.0,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert any(isinstance(c, SetTemperature) for c in cmds_boundary)
+
+    # Non-reporting with no memory -> sent once, unconditionally.
+    cmds_unknown = compute_commands(
+        _base(
+            ac=_climate(
+                hvac="cool",
+                fan_modes=("low", "high"),
+                min_temp=64.0,
+                current_setpoint=None,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert any(isinstance(c, SetTemperature) for c in cmds_unknown)
+
+
+def test_combined_setpoint_memory_match_trusts_echo_heating():
+    """CC-19: memory-match dedup also covers the combined-mode HEAT path."""
+    cmds = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="heat",
+                hvac_modes=("off", "cool", "heat"),
+                current_setpoint=68.9,
+                last_commanded_setpoint=68,
+            ),
+            use_ac=True,
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
+
+
+def test_fan_only_setpoint_gate_skips_even_when_unknown_and_no_memory():
+    """
+    CC-19/CC-32 interaction (reviewer finding).
+
+    A non-reporting device with no memory would, per CC-19, normally be sent
+    once unconditionally — but CC-32 excludes Fan Only from the setpoint gate
+    entirely, so ``_setpoint_needs_send`` is never even reached.
+    """
+    cmds = compute_commands(
+        _base(
+            ac=_climate(
+                hvac_modes=("off", "cool", "fan_only"),
+                fan_modes=("low", "high"),
+                current_setpoint=None,
+            ),
+            use_ac=True,
+            room_temp=70.0,
+            ac_fan_only_override=True,
+        )
+    )
+    assert any(isinstance(c, SetHvacMode) and c.hvac_mode == "fan_only" for c in cmds)
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
+
+
+def test_fan_only_never_emits_set_temperature():
+    """
+    CC-32: SetTemperature is never emitted while decision is Fan Only.
+
+    Each case sets a mismatched current_setpoint that would have triggered a
+    resend under CC-19 alone, to prove the FAN_ONLY gate — not a converged
+    setpoint — is what suppresses SetTemperature.
+    """
+    # Split A/C, fan-only override, room below the cooling threshold.
+    cmds_split_ac = compute_commands(
+        _base(
+            ac=_climate(
+                hvac_modes=("off", "cool", "fan_only"),
+                fan_modes=("low", "high"),
+                current_setpoint=50.0,
+            ),
+            use_ac=True,
+            room_temp=70.0,
+            ac_fan_only_override=True,
+        )
+    )
+    assert any(
+        isinstance(c, SetHvacMode) and c.hvac_mode == "fan_only" for c in cmds_split_ac
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_split_ac)
+
+    # Split heater, native fan-only (room too warm to need heat).
+    cmds_split_heater_native = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="off",
+                hvac_modes=("off", "heat", "fan_only"),
+                fan_modes=("low", "high"),
+                current_setpoint=50.0,
+            ),
+            use_heater=True,
+            room_temp=68.0,
+            target_heating=68.0,
+        )
+    )
+    assert any(
+        isinstance(c, SetHvacMode) and c.hvac_mode == "fan_only"
+        for c in cmds_split_heater_native
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_split_heater_native)
+
+    # Split heater, fan-only override (Use heater off, no standalone fans).
+    cmds_split_heater_override = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="off",
+                hvac_modes=("off", "heat", "fan_only"),
+                fan_modes=("low", "high"),
+                current_setpoint=50.0,
+            ),
+            use_heater=False,
+            heater_fan_only_override=True,
+            room_temp=70.0,
+        )
+    )
+    assert any(
+        isinstance(c, SetHvacMode) and c.hvac_mode == "fan_only"
+        for c in cmds_split_heater_override
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_split_heater_override)
+
+    # Combined, A/C fan-only override, room in the deadband.
+    cmds_combined_override = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="cool",
+                hvac_modes=("off", "cool", "heat", "fan_only"),
+                fan_modes=("low", "high"),
+                current_setpoint=50.0,
+            ),
+            use_ac=True,
+            use_heater=True,
+            room_temp=72.0,  # within deadband: no cool, no heat
+            target_cooling=75.0,
+            target_heating=68.0,
+            cooling_medium=75.0,
+            cooling_high=78.0,
+            ac_fan_only_override=True,
+        )
+    )
+    assert any(
+        isinstance(c, SetHvacMode) and c.hvac_mode == "fan_only"
+        for c in cmds_combined_override
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_combined_override)
+
+    # Combined, heater-native fan-only (room warm enough not to heat).
+    cmds_combined_native = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="heat",
+                hvac_modes=("off", "cool", "heat", "fan_only"),
+                fan_modes=("low", "medium", "high"),
+                current_setpoint=50.0,
+            ),
+            use_ac=False,
+            use_heater=True,
+            room_temp=63.0,  # >= target_heating, so no active heating
+            target_heating=62.0,
+            heating_medium=65.0,
+            heating_high=62.0,
+        )
+    )
+    assert any(
+        isinstance(c, SetHvacMode) and c.hvac_mode == "fan_only"
+        for c in cmds_combined_native
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_combined_native)
+
+
+def test_combined_fan_only_to_cool_transition_converged_echo_skips_setpoint():
+    """
+    CC-32/CC-19: a fan_only -> cool transition still gates SetTemperature on memory.
+
+    The mode transition to Cool is unconditional (CC-19 has no dedup for
+    HVAC mode changes), but the setpoint dedup still applies once the
+    decision is COOL: matching memory plus a within-drift echo must not
+    trigger a resend just because the mode changed.
+    """
+    cmds = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="fan_only",
+                hvac_modes=("off", "cool", "heat", "fan_only"),
+                fan_modes=("low", "high"),
+                current_setpoint=63.4,  # within drift of the clamped 63
+                last_commanded_setpoint=63,
+            ),
+            use_ac=True,
+            room_temp=76.1,  # past the 76.0 cooling restart threshold
+            target_cooling=75.0,
+        )
+    )
+    assert any(isinstance(c, SetHvacMode) and c.hvac_mode == "cool" for c in cmds)
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
 
 
 def test_split_ac_idle_restarts_at_next_degree():
