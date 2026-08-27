@@ -53,7 +53,7 @@
             // moreutils provides sponge
             "packages": "ffmpeg,libturbojpeg0,libpcap-dev,moreutils,git-delta"
         },
-        "ghcr.io/devcontainers/features/docker-in-docker:4.0.0": {
+        "ghcr.io/devcontainers/features/docker-in-docker:4.1.0": {
             // moby packages aren't published for Debian trixie; use upstream Docker CE
             "moby": false
         }
