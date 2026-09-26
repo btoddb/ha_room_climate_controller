@@ -13,11 +13,17 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 
 from .const import (
+    DEFAULT_HUMIDITY_HIGH_OFFSET,
+    DEFAULT_HUMIDITY_MEDIUM_OFFSET,
+    DEFAULT_HUMIDITY_TARGET,
+    DEVICE_FAN,
     DOMAIN,
     KEY_AC_FAN_ONLY,
-    KEY_FAN_REVERSE,
     KEY_HEATER_FAN_ONLY,
     KEY_HIGH_OFFSET,
+    KEY_HUMIDITY_HIGH_OFFSET,
+    KEY_HUMIDITY_MEDIUM_OFFSET,
+    KEY_HUMIDITY_TARGET,
     KEY_MANUAL_MODE,
     KEY_MEDIUM_OFFSET,
     KEY_TARGET,
@@ -30,6 +36,7 @@ from .engine import (
     Command,
     Delay,
     EngineInputs,
+    FanControl,
     FanInfo,
     FanSetDirection,
     FanSetPercentage,
@@ -53,7 +60,14 @@ from .entity import (
     fan_direction_via_preset,
     fan_supports_direction,
 )
-from .models import Room, room_uid
+from .models import (
+    Room,
+    fan_reverse_key,
+    fan_slug,
+    fan_target_key,
+    fan_use_key,
+    room_uid,
+)
 
 if TYPE_CHECKING:
     from .hub import RoomClimateConfigEntry
@@ -148,12 +162,13 @@ def _device_label(room: Room, entity_id: str) -> str:
     labels = {
         room.ac_climate: "A/C",
         room.heater_climate: "Heater",
-        room.fan_entity: "Fan",
         room.ac_fan_entity: "A/C fan",
         room.heater_fan_entity: "Heater fan",
         room.ac_power_switch: "A/C power",
         room.heater_power_switch: "Heater power",
     }
+    for eid in room.fan_entities:
+        labels[eid] = f"Fan {eid.split('.')[-1]}"
     return labels.get(entity_id) or entity_id
 
 
@@ -198,10 +213,21 @@ def _threshold_context(room: Room, inputs: EngineInputs) -> str:
             f"heating target {int(inputs.target_heating)}°F "
             f"(med {int(inputs.heating_medium)}°F high {int(inputs.heating_high)}°F)"
         )
-    if room.has_fan:
+    parts.extend(
+        f"fan {fan.info.entity_id.split('.')[-1]} target {int(fan.target)}°F "
+        f"(med {int(fan.medium)}°F high {int(fan.high)}°F)"
+        for fan in inputs.fans
+    )
+    if (
+        inputs.room_humidity is not None
+        and inputs.humidity_target is not None
+        and inputs.humidity_medium is not None
+        and inputs.humidity_high is not None
+    ):
         parts.append(
-            f"fan target {int(inputs.target_fan)}°F "
-            f"(med {int(inputs.fan_medium)}°F high {int(inputs.fan_high)}°F)"
+            f"humidity {int(inputs.room_humidity)}% "
+            f"target {int(inputs.humidity_target)}% "
+            f"(med {int(inputs.humidity_medium)}% high {int(inputs.humidity_high)}%)"
         )
     return "; ".join(parts)
 
@@ -219,6 +245,10 @@ class RoomController:
         self._unsub_state = None
         self._tracked: frozenset[str] = frozenset()
         self._task: asyncio.Task | None = None
+        # Whole-°F value RCC last successfully commanded to each climate
+        # entity (CC-19), keyed by entity_id. Cleared while manual mode is
+        # active, since the user may change device setpoints by hand.
+        self._last_commanded_setpoints: dict[str, int] = {}
 
     # -- lifecycle -----------------------------------------------------------
     @callback
@@ -281,12 +311,14 @@ class RoomController:
                     room.key,
                     describe_fan_capabilities(self.hass, room.heater_fan_entity),
                 )
-        if room.has_fan and room.fan_entity:
-            _CAPABILITIES_LOGGER.info(
-                "[room=%s] Fan capabilities: %s",
-                room.key,
-                describe_fan_capabilities(self.hass, room.fan_entity),
-            )
+        if room.has_fan:
+            for eid in room.fan_entities:
+                _CAPABILITIES_LOGGER.info(
+                    "[room=%s] Fan %s capabilities: %s",
+                    room.key,
+                    eid,
+                    describe_fan_capabilities(self.hass, eid),
+                )
 
     # -- subscriptions -------------------------------------------------------
     @callback
@@ -312,6 +344,8 @@ class RoomController:
             ids.add(self.room.humidity_sensor)
         ids.update(self.room.window_sensors)
         for device in self.room.devices:
+            if device == DEVICE_FAN:
+                continue
             for key in (
                 KEY_USE[device],
                 KEY_TARGET[device],
@@ -321,11 +355,36 @@ class RoomController:
                 domain = "switch" if key.startswith("use_") else "number"
                 if eid := self._resolve(key, domain):
                     ids.add(eid)
+        if self.room.has_fan:
+            # The humidity numbers exist only when the room also reports humidity.
+            humidity_keys: tuple[tuple[str, str], ...] = (
+                (
+                    (KEY_HUMIDITY_TARGET, "number"),
+                    (KEY_HUMIDITY_MEDIUM_OFFSET, "number"),
+                    (KEY_HUMIDITY_HIGH_OFFSET, "number"),
+                )
+                if self.room.humidity_sensor
+                else ()
+            )
+            fan_keys: list[tuple[str, str]] = [
+                (KEY_MEDIUM_OFFSET["fan"], "number"),
+                (KEY_HIGH_OFFSET["fan"], "number"),
+                *humidity_keys,
+            ]
+            for fan_eid in self.room.fan_entities:
+                slug = fan_slug(fan_eid)
+                fan_keys += [
+                    (fan_use_key(slug), "switch"),
+                    (fan_target_key(slug), "number"),
+                    (fan_reverse_key(slug), "switch"),
+                ]
+            for key, domain in fan_keys:
+                if eid := self._resolve(key, domain):
+                    ids.add(eid)
         for key in (
             KEY_MANUAL_MODE,
             KEY_AC_FAN_ONLY,
             KEY_HEATER_FAN_ONLY,
-            KEY_FAN_REVERSE,
         ):
             if eid := self._resolve(key, "switch"):
                 ids.add(eid)
@@ -340,20 +399,6 @@ class RoomController:
         old_val = old.state if old else None
         new_val = new.state if new else None
         changed = old_val != new_val
-        if entity_id == self.room.humidity_sensor:
-            # CC-L2: humidity must never command a device — the engine ignores
-            # humidity entirely, so short-circuit unconditionally (regardless of
-            # ``changed``) rather than resubscribing/requesting a run that could
-            # flush an owed command from an unrelated change. Only log when the
-            # value actually moved.
-            if changed:
-                _SENSOR_LOGGER.info(
-                    "[room=%s] Humidity changed: %s → %s%%",
-                    self.room.key,
-                    old_val,
-                    new_val,
-                )
-            return
         trigger = f"{entity_id} changed"
         if changed and entity_id == self.room.temperature_sensor:
             _SENSOR_LOGGER.info(
@@ -363,6 +408,20 @@ class RoomController:
                 new_val,
             )
             trigger = f"temperature {old_val}→{new_val}°F"
+        elif entity_id == self.room.humidity_sensor:
+            if changed:
+                _SENSOR_LOGGER.info(
+                    "[room=%s] Humidity changed: %s → %s%%",
+                    self.room.key,
+                    old_val,
+                    new_val,
+                )
+                trigger = f"humidity {old_val}→{new_val}%"
+            if not self.room.has_fan:
+                # Humidity is inert without fans (CC-28): the evaluation could
+                # not change anything, and requesting one would cancel a run
+                # already in flight.
+                return
         elif changed and entity_id in self.room.window_sensors:
             state_label = "opened" if new_val == "on" else "closed"
             _SENSOR_LOGGER.info(
@@ -397,11 +456,6 @@ class RoomController:
                 return replace(cmd, temperature=temperature)
         return cmd
 
-    def _device_reports_setpoint(self, entity_id: str) -> bool:
-        """Whether ``entity_id`` currently reports a ``temperature`` attribute."""
-        state = self.hass.states.get(entity_id)
-        return bool(state) and state.attributes.get("temperature") is not None
-
     # -- evaluation ----------------------------------------------------------
     @callback
     def async_request_run(self, trigger: str = "evaluation") -> None:
@@ -432,6 +486,25 @@ class RoomController:
                 # the CC-L7 description, so the log always matches what was
                 # actually sent.
                 resolved_cmd = self._resolve_command(cmd)
+                # CC-19: a mode-transition snapshot (e.g. fan_only -> cool) can
+                # resolve the engine's desired setpoint against a degenerate
+                # pre-transition range, so the *live-resolved* value can land
+                # back on what memory already has even though the engine's
+                # raw desired value didn't match. Drop it here rather than
+                # re-sending a value the device was already just commanded.
+                if (
+                    isinstance(resolved_cmd, SetTemperature)
+                    and self._last_commanded_setpoints.get(resolved_cmd.entity_id)
+                    == resolved_cmd.temperature
+                ):
+                    _LOGGER.debug(
+                        "Room %s: skipping SetTemperature %s=%s°F "
+                        "(resolved value matches last-commanded memory)",
+                        self.room.key,
+                        resolved_cmd.entity_id,
+                        resolved_cmd.temperature,
+                    )
+                    continue
                 action_descriptions.append(_describe_command(resolved_cmd, self.room))
                 domain, service, data = _service_for(resolved_cmd)
                 # Isolate each call: one device rejecting a command (e.g. a
@@ -451,6 +524,15 @@ class RoomController:
                         service,
                         data,
                     )
+                else:
+                    # CC-19: remember what was actually sent (the live-clamped
+                    # value) so the next evaluation's memory-vs-desired
+                    # compare is self-consistent in steady state. Only on
+                    # success — a failed call must retry next evaluation.
+                    if isinstance(resolved_cmd, SetTemperature):
+                        self._last_commanded_setpoints[resolved_cmd.entity_id] = (
+                            resolved_cmd.temperature
+                        )
             if action_descriptions:
                 _LOGGER.info(
                     "[room=%s] RCC commanded: %s (trigger: %s; %s)",
@@ -470,6 +552,10 @@ class RoomController:
         # Default to manual (dormant) when the state can't be read, so a lost or
         # not-yet-restored switch state never silently re-activates control.
         if self._switch_state(KEY_MANUAL_MODE, default=True):
+            # CC-19: forget commanded setpoints while dormant — the user may
+            # change device setpoints by hand during manual mode, so
+            # re-activation must re-enforce rather than trust stale memory.
+            self._last_commanded_setpoints.clear()
             return None
         room_temp = self._temperature()
         if room_temp is None:
@@ -477,13 +563,47 @@ class RoomController:
 
         target_cooling = self._number(KEY_TARGET["cooling"], 72.0)
         target_heating = self._number(KEY_TARGET["heating"], 68.0)
-        target_fan = self._number(KEY_TARGET["fan"], 72.0)
         cool_med = self._number(KEY_MEDIUM_OFFSET["cooling"], 3.0)
         cool_high = self._number(KEY_HIGH_OFFSET["cooling"], 6.0)
         heat_med = self._number(KEY_MEDIUM_OFFSET["heating"], 3.0)
         heat_high = self._number(KEY_HIGH_OFFSET["heating"], 6.0)
+
         fan_med = self._number(KEY_MEDIUM_OFFSET["fan"], 3.0)
         fan_high = self._number(KEY_HIGH_OFFSET["fan"], 6.0)
+        fans: list[FanControl] = []
+        for eid in room.fan_entities:
+            info = self._fan_info(eid)
+            if info is None:
+                continue  # physical fan not available yet; controlled when it returns
+            slug = fan_slug(eid)
+            target = self._number(fan_target_key(slug), 72.0)
+            fans.append(
+                FanControl(
+                    info=info,
+                    use=self._switch_state(fan_use_key(slug), default=False),
+                    target=target,
+                    medium=target + fan_med,
+                    high=target + fan_high,
+                    reverse=self._switch_state(fan_reverse_key(slug), default=False),
+                )
+            )
+
+        # Humidity fan trigger: only meaningful when the room has both a
+        # humidity sensor and a fan. Offsets are resolved into absolute %RH
+        # thresholds here, matching how the temperature tiers are passed.
+        room_humidity = humidity_target = humidity_medium = humidity_high = None
+        if room.has_fan and room.humidity_sensor:
+            room_humidity = self._humidity()
+            if room_humidity is not None:
+                humidity_target = self._number(
+                    KEY_HUMIDITY_TARGET, float(DEFAULT_HUMIDITY_TARGET)
+                )
+                humidity_medium = humidity_target + self._number(
+                    KEY_HUMIDITY_MEDIUM_OFFSET, float(DEFAULT_HUMIDITY_MEDIUM_OFFSET)
+                )
+                humidity_high = humidity_target + self._number(
+                    KEY_HUMIDITY_HIGH_OFFSET, float(DEFAULT_HUMIDITY_HIGH_OFFSET)
+                )
 
         return EngineInputs(
             combined=room.combined,
@@ -494,14 +614,13 @@ class RoomController:
                 if room.has_heater and not room.combined
                 else None
             ),
-            fan=self._fan_info(room.fan_entity) if room.has_fan else None,
+            fans=tuple(fans),
             ac_fan=self._fan_info(room.ac_fan_entity),
             heater_fan=self._fan_info(room.heater_fan_entity),
             ac_power=self._switch_info(room.ac_power_switch),
             heater_power=self._switch_info(room.heater_power_switch),
             use_ac=self._switch_state(KEY_USE["cooling"], default=False),
             use_heater=self._switch_state(KEY_USE["heating"], default=False),
-            use_fan=self._switch_state(KEY_USE["fan"], default=False),
             ac_fan_only_override=self._switch_state(KEY_AC_FAN_ONLY, default=False),
             heater_fan_only_override=self._switch_state(
                 KEY_HEATER_FAN_ONLY, default=False
@@ -512,13 +631,13 @@ class RoomController:
             target_heating=target_heating,
             heating_medium=target_heating - heat_med,
             heating_high=target_heating - heat_high,
-            target_fan=target_fan,
-            fan_medium=target_fan + fan_med,
-            fan_high=target_fan + fan_high,
             command_delay_ms=int(room.command_delay * 1000),
             power_on_delay_ms=int(room.power_on_delay * 1000),
             window_open=self._window_open(),
-            fan_reverse=self._switch_state(KEY_FAN_REVERSE, default=False),
+            room_humidity=room_humidity,
+            humidity_target=humidity_target,
+            humidity_medium=humidity_medium,
+            humidity_high=humidity_high,
         )
 
     # -- state readers -------------------------------------------------------
@@ -531,6 +650,17 @@ class RoomController:
         if not self.room.temperature_sensor:
             return None
         state = self.hass.states.get(self.room.temperature_sensor)
+        if state is None or state.state in _INVALID:
+            return None
+        try:
+            return float(state.state)
+        except TypeError, ValueError:
+            return None
+
+    def _humidity(self) -> float | None:
+        if not self.room.humidity_sensor:
+            return None
+        state = self.hass.states.get(self.room.humidity_sensor)
         if state is None or state.state in _INVALID:
             return None
         try:
@@ -582,6 +712,7 @@ class RoomController:
             max_temp=attrs.get("max_temp"),
             supports_set_temp=bool(features & 1),
             current_setpoint=float(raw_setpoint) if raw_setpoint is not None else None,
+            last_commanded_setpoint=self._last_commanded_setpoints.get(entity_id),
         )
 
     def _fan_info(self, entity_id: str | None) -> FanInfo | None:

@@ -40,11 +40,21 @@ export function buildLiveRoomFromConfig(
     has_fan: meta.has_fan,
     useCooling: config.use_ac,
     useHeating: meta.has_heating ? config.use_heater : undefined,
-    useFan: meta.has_fan ? config.use_fan : undefined,
     fanOverride: config.ac_fan_only_override,
-    fanReverse: meta.fan_reversible ? config.fan_reverse_toggle : undefined,
     cooling: config.target_cooling,
     heating: meta.has_heating ? config.target_heating : undefined,
-    fan: meta.has_fan ? config.target_fan : undefined,
+    fans: config.fans.map((f) => ({
+      slug: f.slug,
+      label: f.label,
+      // The live room has no stored preset scalars; the clipboard builder reads
+      // the current on/temp/reverse straight from these entities' states.
+      use: false,
+      temp: null,
+      reverse: false,
+      reversible: f.reversible,
+      useEntity: f.use,
+      tempEntity: f.target,
+      reverseEntity: f.reversible ? f.reverse : "",
+    })),
   };
 }

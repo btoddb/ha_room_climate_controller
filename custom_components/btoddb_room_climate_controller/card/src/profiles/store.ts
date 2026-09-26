@@ -79,12 +79,20 @@ function toRoutine(p: WsProfile): RoutineConfig {
     has_fan: p.has_fan,
     useCooling: presets.cooling?.use_entity ?? undefined,
     useHeating: presets.heating?.use_entity ?? undefined,
-    useFan: presets.fan?.use_entity ?? undefined,
     fanOverride: p.entities.fan_override ?? undefined,
-    fanReverse: p.entities.fan_reverse ?? undefined,
     cooling: presets.cooling?.temp_entity ?? "",
     heating: presets.heating?.temp_entity ?? undefined,
-    fan: presets.fan?.temp_entity ?? undefined,
+    fans: (p.entities.fan_presets ?? []).map((fp) => ({
+      slug: fp.slug,
+      label: fp.label,
+      use: fp.use,
+      temp: fp.temp,
+      reverse: fp.reverse,
+      reversible: fp.reversible,
+      useEntity: fp.use_entity ?? "",
+      tempEntity: fp.temp_entity ?? "",
+      reverseEntity: fp.reverse_entity ?? "",
+    })),
   };
   return {
     profileId: p.id,

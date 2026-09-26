@@ -108,6 +108,13 @@ export function getNumberLimits(
 
 export type TargetTempDevice = "cooling" | "heating" | "fan";
 
+/** Compute the allowed target range for a device.
+
+A room can now have several fans, but every fan shares one high offset and the
+same min/max limits, and fans never constrain each other (no sibling coupling
+like cooling↔heating). So each fan resolves independently by passing
+`device: "fan"` with the shared `highOffset` and no `siblingTarget` — the "fan"
+branch below is per-fan-agnostic. */
 export function getEffectiveTargetLimits(
   device: TargetTempDevice,
   limits: { min: number; max: number },

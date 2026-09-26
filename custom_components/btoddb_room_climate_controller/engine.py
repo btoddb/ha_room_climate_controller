@@ -34,11 +34,24 @@ _OFF_LIKE = frozenset({"off", "unavailable", "unknown", "none", "", None})
 # within HYSTERESIS_OFF of the target; once stopped it does not restart until
 # the room passes the next whole degree past the target. The device's reported
 # running mode (COOL/HEAT/fan on) is the hysteresis state — the engine stays
-# stateless. Setpoints and fan-speed tiers still truncate (CC-5).
+# stateless. Setpoints and fan-speed tiers still truncate (CC-5). The humidity
+# fan trigger (CC-30) uses the same shape with its own wider %RH band.
 HYSTERESIS_OFF: Final = 0.2
 HYSTERESIS_ON: Final = 1.0
 
+HUMIDITY_HYSTERESIS_OFF: Final = 0.5
+HUMIDITY_HYSTERESIS_ON: Final = 2.0
+
 MAX_PERCENTAGE: Final = 100.0
+
+# Setpoint dedup (CC-19). The controller remembers the whole-°F value it last
+# commanded to each entity and passes it in as ``last_commanded_setpoint``;
+# the engine itself stays stateless. SETPOINT_TOLERANCE bounds the one
+# situation with no memory to trust: startup / no-memory fallback, where a
+# device's reported echo within less than 1 °F of the desired value counts as
+# converged (absorbs a °C-native device's own whole-°C grid rounding). Once
+# memory is available it is trusted absolutely — see ``_setpoint_needs_send``.
+SETPOINT_TOLERANCE: Final = 1.0
 
 
 def _wants_cool(room: float, target: float, running: bool) -> bool:  # noqa: FBT001
@@ -46,6 +59,17 @@ def _wants_cool(room: float, target: float, running: bool) -> bool:  # noqa: FBT
     if running:
         return room > target + HYSTERESIS_OFF
     return room >= target + HYSTERESIS_ON
+
+
+def _wants_fan_for_humidity(
+    humidity: float,
+    target: float,
+    running: bool,  # noqa: FBT001
+) -> bool:
+    """Humidity hysteresis (CC-30): cooling-style, wider band for noisy %RH."""
+    if running:
+        return humidity > target + HUMIDITY_HYSTERESIS_OFF
+    return humidity >= target + HUMIDITY_HYSTERESIS_ON
 
 
 def _wants_heat(room: float, target: float, running: bool) -> bool:  # noqa: FBT001
@@ -89,17 +113,40 @@ def clamp_setpoint(value: int, min_temp: float | None, max_temp: float | None) -
 def _setpoint_needs_send(
     current_setpoint: float | None,
     desired_setpoint: int,
+    last_commanded: int | None,
 ) -> bool:
     """
     Whether a ``SetTemperature`` is needed for the current evaluation (CC-19).
 
-    A device that doesn't report its setpoint (``current_setpoint is None``)
-    can never be confirmed to have converged, so it is always (re)sent —
-    mirroring CC-23's "unknown never matches" convention for fan direction.
-    The controller logs that the device is non-reporting so this is
-    distinguishable from a genuine setpoint mismatch.
+    The engine stays stateless — ``last_commanded`` is memory the controller
+    keeps of the whole-°F value it last successfully commanded to this
+    entity, supplied as input each evaluation.
+
+    With memory available (``last_commanded is not None``), it is trusted
+    **absolutely**: send iff the desired value differs from it
+    (``desired_setpoint != last_commanded``); the reported ``current_setpoint``
+    is not consulted at all. A bounded "drift" re-send was tried and
+    rejected: a device with a coarse enough native grid can echo a
+    commanded value far enough off (e.g. it clamps internally) that any fixed
+    threshold gets crossed on every evaluation, recreating the exact beep
+    loop this dedup exists to prevent. A genuine device-side setpoint change
+    (user remote, device revert) is therefore deliberately **not fought** —
+    it persists until the desired value itself changes, manual mode toggles
+    (which clears memory), or HA restarts (which also clears memory). Manual
+    mode is the sanctioned way to override RCC's setpoint.
+
+    Without memory (fresh start, or after manual mode cleared it): a device
+    that has never reported a setpoint is sent once, unconditionally — memory
+    then takes over on the next evaluation. A reporting device is treated as
+    converged when its echo is less than ``SETPOINT_TOLERANCE`` (1 °F) from
+    desired (absorbing a °C-native device's own whole-°C grid rounding); an
+    echo exactly ``SETPOINT_TOLERANCE`` off is sent.
     """
-    return current_setpoint is None or current_setpoint != desired_setpoint
+    if last_commanded is not None:
+        return desired_setpoint != last_commanded
+    if current_setpoint is None:
+        return True
+    return abs(current_setpoint - desired_setpoint) >= SETPOINT_TOLERANCE
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +165,10 @@ class ClimateInfo:
     supports_set_temp: bool
     current_setpoint: float | None = None
     max_temp: float | None = None
+    # Whole-°F value RCC last successfully commanded to this entity (CC-19),
+    # kept by the controller across evaluations; None when never commanded or
+    # the memory was cleared (e.g. while manual mode is active).
+    last_commanded_setpoint: int | None = None
 
     @property
     def has_fan(self) -> bool:
@@ -151,6 +202,18 @@ class FanInfo:
 
 
 @dataclass(frozen=True)
+class FanControl:
+    """A single standalone fan's live state plus its resolved control values."""
+
+    info: FanInfo
+    use: bool
+    target: float
+    medium: float  # target + shared medium offset (absolute threshold)
+    high: float  # target + shared high offset (absolute threshold)
+    reverse: bool
+
+
+@dataclass(frozen=True)
 class SwitchInfo:
     """Current state of a power switch."""
 
@@ -167,15 +230,14 @@ class EngineInputs:
     # devices (None when the room lacks them)
     ac: ClimateInfo | None
     heater: ClimateInfo | None
-    fan: FanInfo | None
     ac_fan: FanInfo | None
     heater_fan: FanInfo | None
+    fans: tuple[FanControl, ...]
     ac_power: SwitchInfo | None
     heater_power: SwitchInfo | None
     # use toggles + overrides
     use_ac: bool
     use_heater: bool
-    use_fan: bool
     ac_fan_only_override: bool
     heater_fan_only_override: bool
     # setpoints / thresholds
@@ -185,16 +247,17 @@ class EngineInputs:
     target_heating: float
     heating_medium: float
     heating_high: float
-    target_fan: float
-    fan_medium: float
-    fan_high: float
     command_delay_ms: int
     power_on_delay_ms: int
     # window sensor: True when the room's window is open. Suppresses active
     # cooling/heating (Cool/Heat) only — fan-only circulation is unaffected.
     window_open: bool = False
-    # requested standalone-fan direction: True → reverse, False → forward (CC-22)
-    fan_reverse: bool = False
+    # Room-level humidity trigger (standalone fans only). All None ⇒ ignored
+    # (no humidity sensor, sensor unreadable, or room has no fans).
+    room_humidity: float | None = None
+    humidity_target: float | None = None
+    humidity_medium: float | None = None  # absolute: target + medium offset
+    humidity_high: float | None = None  # absolute: target + high offset
 
     # derived helpers ----------------------------------------------------
     @property
@@ -209,8 +272,13 @@ class EngineInputs:
 
     @property
     def has_fan(self) -> bool:
-        """Return True when a standalone fan entity is configured."""
-        return self.fan is not None
+        """Return True when the room has one or more standalone fans."""
+        return bool(self.fans)
+
+    @property
+    def use_fan(self) -> bool:
+        """Whether any standalone fan's Use toggle is on (CC-12 fan-only override)."""
+        return any(f.use for f in self.fans)
 
     @property
     def ac_setpoint_int(self) -> int:
@@ -228,14 +296,6 @@ class EngineInputs:
     def target_heating_int(self) -> int:
         """Return the heating target truncated to whole degrees."""
         return int(self.target_heating)
-
-    @property
-    def fan_needs_on(self) -> bool:
-        """Whether the standalone fan should run (CC-27 cooling-style hysteresis)."""
-        if not self.use_fan:
-            return False
-        running = self.fan is not None and self.fan.is_on
-        return _wants_cool(self.room_temp, self.target_fan, running)
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +429,8 @@ def compute_commands(inp: EngineInputs) -> list[Command]:
             _split_ac(inp, out)
         if inp.heater is not None:
             _split_heater(inp, out)
-    if inp.fan is not None:
-        _standalone_fan(inp, out)
+    for fan in inp.fans:
+        _standalone_fan(fan, inp, out)
     return out.items
 
 
@@ -434,10 +494,15 @@ def _combined(inp: EngineInputs, out: _Out) -> None:  # noqa: PLR0912
             TurnOffClimate(ac.entity_id),
         )
     desired_setpoint = clamp_setpoint(target, ac.min_temp, ac.max_temp)
+    # CC-32: setpoint is meaningless in fan-only, and devices report
+    # mode-dependent (sometimes degenerate) ranges there — only send it while
+    # actively conditioning.
     if (
-        decision != OFF
+        decision in (COOL, HEAT)
         and ac.supports_set_temp
-        and _setpoint_needs_send(ac.current_setpoint, desired_setpoint)
+        and _setpoint_needs_send(
+            ac.current_setpoint, desired_setpoint, ac.last_commanded_setpoint
+        )
     ):
         out.add(SetTemperature(ac.entity_id, target, decision))
     if inp.ac_power and decision == OFF and inp.ac_power.is_on:
@@ -497,10 +562,15 @@ def _split_ac(inp: EngineInputs, out: _Out) -> None:
             TurnOffClimate(ac.entity_id),
         )
     desired_setpoint = clamp_setpoint(inp.ac_setpoint_int, ac.min_temp, ac.max_temp)
+    # CC-32: setpoint is meaningless in fan-only, and devices report
+    # mode-dependent (sometimes degenerate) ranges there — only send it while
+    # actively conditioning.
     if (
-        decision in (COOL, FAN_ONLY)
+        decision == COOL
         and ac.supports_set_temp
-        and _setpoint_needs_send(ac.current_setpoint, desired_setpoint)
+        and _setpoint_needs_send(
+            ac.current_setpoint, desired_setpoint, ac.last_commanded_setpoint
+        )
     ):
         out.add(SetTemperature(ac.entity_id, inp.ac_setpoint_int, decision))
     if inp.ac_power and decision == OFF and inp.ac_power.is_on:
@@ -562,10 +632,15 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
     desired_setpoint = clamp_setpoint(
         inp.target_heating_int, heater.min_temp, heater.max_temp
     )
+    # CC-32: setpoint is meaningless in fan-only, and devices report
+    # mode-dependent (sometimes degenerate) ranges there — only send it while
+    # actively conditioning.
     if (
-        decision in (HEAT, FAN_ONLY)
+        decision == HEAT
         and heater.supports_set_temp
-        and _setpoint_needs_send(heater.current_setpoint, desired_setpoint)
+        and _setpoint_needs_send(
+            heater.current_setpoint, desired_setpoint, heater.last_commanded_setpoint
+        )
     ):
         out.add(SetTemperature(heater.entity_id, inp.target_heating_int, decision))
     if inp.heater_power and decision == OFF and inp.heater_power.is_on:
@@ -641,31 +716,54 @@ def _same_fan_speed(reported: int, target: int, step: float) -> bool:
 # ---------------------------------------------------------------------------
 # Standalone fan (shared by both branches)
 # ---------------------------------------------------------------------------
-def _standalone_fan(inp: EngineInputs, out: _Out) -> None:
-    fan = inp.fan
-    assert fan is not None
-    if not inp.fan_needs_on:
-        if fan.is_on:
-            out.add(FanTurnOff(fan.entity_id))
+def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
+    info = fan.info
+    # CC-13/CC-27: run when Use fan on and past the fan threshold (cooling-style
+    # hysteresis keyed on the fan's own reported on/off state). CC-28/CC-29:
+    # room humidity is an independent trigger — the fan runs when *either*
+    # trigger wants it on, and stops only when both decline. The humidity
+    # trigger is inactive unless a reading and all its thresholds resolved.
+    temp_wants = _wants_cool(inp.room_temp, fan.target, info.is_on)
+    hum_active = (
+        inp.room_humidity is not None
+        and inp.humidity_target is not None
+        and inp.humidity_medium is not None
+        and inp.humidity_high is not None
+    )
+    hum_wants = hum_active and _wants_fan_for_humidity(
+        inp.room_humidity, inp.humidity_target, info.is_on
+    )
+    needs_on = fan.use and (temp_wants or hum_wants)
+    if not needs_on:
+        if info.is_on:
+            out.add(FanTurnOff(info.entity_id))
         return
-    label, percent = cooling_speed(inp.room_temp, inp.fan_medium, inp.fan_high)
-    if not fan.is_on:
-        out.add(FanTurnOn(fan.entity_id), Delay(inp.command_delay_ms))
-    if label in fan.preset_modes:
-        if (fan.preset_mode or "").lower() != label:
-            out.add(FanSetPreset(fan.entity_id, label))
-    elif not _same_fan_speed(fan.percentage, percent, fan.percentage_step):
-        out.add(FanSetPercentage(fan.entity_id, percent))
+    # CC-14: speed follows the cooling-style tiers against this fan's thresholds.
+    # CC-29: with humidity active the faster of the two ladders wins.
+    label, percent = cooling_speed(inp.room_temp, fan.medium, fan.high)
+    if hum_active:
+        h_label, h_percent = cooling_speed(
+            inp.room_humidity, inp.humidity_medium, inp.humidity_high
+        )
+        if h_percent > percent:
+            label, percent = h_label, h_percent
+    if not info.is_on:
+        out.add(FanTurnOn(info.entity_id), Delay(inp.command_delay_ms))
+    if label in info.preset_modes:
+        if (info.preset_mode or "").lower() != label:
+            out.add(FanSetPreset(info.entity_id, label))
+    elif not _same_fan_speed(info.percentage, percent, info.percentage_step):
+        out.add(FanSetPercentage(info.entity_id, percent))
     # Direction (CC-22..CC-24): only reversible fans, only while running, and
     # only when the reported direction differs (unknown never matches).
-    if fan.reversible:
-        desired = REVERSE if inp.fan_reverse else FORWARD
-        if fan.direction != desired:
+    if info.reversible:
+        desired = REVERSE if fan.reverse else FORWARD
+        if info.direction != desired:
             out.add(
                 FanSetDirection(
-                    fan.entity_id,
+                    info.entity_id,
                     desired,
-                    via_preset=fan.direction_via_preset,
-                    forward_preset=fan.forward_preset,
+                    via_preset=info.direction_via_preset,
+                    forward_preset=info.forward_preset,
                 )
             )

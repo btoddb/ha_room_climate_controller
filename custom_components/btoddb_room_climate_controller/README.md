@@ -15,7 +15,10 @@ their controls are **native entities**, and a reactive engine drives your real
   (`number.*` targets/offsets, `switch.*` use-toggles / manual-mode /
   fan-only-override) and a `RoomController` reacts to them — choosing
   cool/heat/fan-only/off, fan speed tiers, and honoring a manual-mode kill switch.
-  Supports combined heat-pumps and split A/C + heater setups.
+  Supports combined heat-pumps and split A/C + heater setups. A room's **humidity**
+  is a second fan trigger: give the room a humidity sensor and a fan and it also
+  gets a humidity target (%) plus medium/high offsets, so the fans run — and pick
+  their speed — when the room is too damp as well as too warm.
 - **Daily profiles.** A profile is a named, scheduled preset for a room (per-device
   target temps + use toggles + fan-only override). At its scheduled time (or via
   "apply now") it copies its presets onto the room's live entities and the
@@ -59,7 +62,9 @@ install, then restart Home Assistant.
 1. **Settings → Devices & Services → Add Integration → "BToddB Room Climate Controller"**
    (optionally pick the outdoor temperature source).
 2. On the entry, choose **Add room** and wire one room's devices, sensors, limits,
-   and timing. Repeat per room.
+   and timing. Repeat per room. Wiring a **humidity sensor** on a room that has a
+   standalone fan also creates that room's humidity target/offset entities, so
+   humidity can drive the fans.
 
 No YAML, no `secrets.yaml` token, no scripts to copy.
 

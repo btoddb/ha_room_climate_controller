@@ -24,13 +24,18 @@ while any is open (CC-20).
 ## Per-room controls (entities)
 
 For each device the room has, the integration creates live entities the engine
-reads and the card/profiles write:
+reads and the card/profiles write. A room may have **multiple standalone fans**
+(`fan_entities`, a list); each fan's live entities are keyed by a **slug of the
+fan's source entity id**, so per-fan keys take the form `…__<slug>`.
 
-- **Target temp** — `number.*` (`target_cooling_temp` / `target_heating_temp` / `target_fan_temp`).
-- **Medium offset** and **High offset** — `number.*`, range **1–20 °F** (`OFFSET_MIN`/`OFFSET_MAX`). They define the fan-speed thresholds (CC-7).
-- **Use** toggle — `switch.*` (`use_ac` / `use_heater` / `use_fan`).
+- **Target temp** — `number.*` (`target_cooling_temp` / `target_heating_temp`; per fan, `target_fan_temp__<slug>`).
+- **Medium offset** and **High offset** — `number.*`, range **1–20 °F** (`OFFSET_MIN`/`OFFSET_MAX`). They define the fan-speed thresholds (CC-7). A room's fans **share a single** Medium/High offset pair (`fan_medium_offset` / `fan_high_offset`), not one pair per fan.
+- **Use** toggle — `switch.*` (`use_ac` / `use_heater`; per fan, `use_fan__<slug>`).
 - **Manual mode** — one `switch.*` per room (`manual_mode`).
 - **Fan-only override** — `switch.*` per applicable device (see CC-12).
+- **Fan reverse** — `switch.*` per fan (`fan_reverse__<slug>`; see CC-22).
+- **Humidity target** — one `number.*` per room (`humidity_target`), range **30–90 %**, default **60**. Created **only** when the room has a humidity sensor **and** at least one standalone fan (CC-28).
+- **Humidity medium offset** and **Humidity high offset** — `number.*`, range **1–30 %** (`humidity_medium_offset` / `humidity_high_offset`, defaults 5/10), shared by all of the room's fans. Same creation condition as the humidity target (CC-28); they define the humidity speed thresholds.
 
 ## Temperature comparison
 
@@ -43,7 +48,8 @@ reads and the card/profiles write:
 
 ## Idempotent command emission
 
-- **CC-19** The engine emits a device command **only when it changes the device's state**. Every command is gated against the device's currently-reported state and skipped when already satisfied: HVAC-mode / setpoint / fan-mode sets against the climate's reported mode/setpoint/fan_mode, and turn-on/turn-off of climates, fans, and power switches against their current on/off state. Combined with CC-5, a fractional sensor change that leaves the truncated comparison unchanged produces **no commands** — important because many devices (e.g. heat pumps) audibly chirp on every received command. **Exception:** a climate device that never reports its setpoint (`current_setpoint` always `None`) can't be confirmed to have converged, so `SetTemperature` is sent on **every** evaluation regardless — the same "unknown never matches" convention CC-23 uses for fan direction. The controller logs that the device is non-reporting whenever this fires, so the resend is distinguishable in logs from a device genuinely rejecting/reverting a setpoint.
+- **CC-19** The engine emits a device command **only when it changes the device's state**. Every command is gated against the device's currently-reported state and skipped when already satisfied: HVAC-mode / fan-mode sets against the climate's reported mode/fan_mode, and turn-on/turn-off of climates, fans, and power switches against their current on/off state. Combined with CC-5, a fractional sensor change that leaves the truncated comparison unchanged produces **no commands** — important because many devices (e.g. heat pumps) audibly chirp on every received command. Whenever a setpoint would be sent at all (decision Cool or Heat — see CC-32; there is no setpoint gate to speak of in Fan Only/Off), the gate is **last-commanded-setpoint memory, not a direct compare against the device's reported echo**: the controller remembers the whole-°F value it last successfully commanded to each climate entity and passes it to the engine as input each evaluation (the engine itself stays stateless). With memory present, `SetTemperature` is sent **iff the desired whole-°F value differs from the last-commanded value** — the reported echo is not consulted at all. Memory, once present, is trusted **absolutely**: no bounded "drift" re-send against the echo is attempted, because any fixed threshold has a failure mode where a coarse-enough device grid (e.g. an internal clamp) crosses it on every evaluation and recreates the same beep loop the dedup exists to prevent. A genuine device-side setpoint change (user remote, device revert) is therefore deliberately **not fought** — it persists until the desired value itself changes, manual mode toggles, or HA restarts; manual mode (which clears the controller's memory while active, since the user may change device setpoints by hand) is the sanctioned way to override RCC's setpoint. The controller additionally drops a send whose **live-resolved** value (CC-9's send-time clamp) equals the last-commanded value even when the engine's raw desired value didn't match memory — this covers a mode-transition evaluation (e.g. Fan Only → Cool) where the engine's desired setpoint was computed against a stale, mode-dependent (sometimes degenerate) snapshot of the device's range. **Without memory** (fresh start, or after manual mode cleared it): a device that has never reported a setpoint is sent once, unconditionally, and memory takes over from the next evaluation on; a reporting device is treated as converged once its echo is **less than** `SETPOINT_TOLERANCE` (1 °F) from desired (absorbing a °C-native device's own whole-°C grid rounding) — an echo exactly `SETPOINT_TOLERANCE` off is sent.
+- **CC-32** `SetTemperature` is emitted **only while actively conditioning** — decision Cool or Heat — never in Fan Only or Off. The setpoint has no effect in fan-only, and devices report mode-dependent (sometimes degenerate) temperature ranges in that mode, so sending a setpoint there is at best a no-op and at worst nonsensical.
 
 ## Thresholds & fan-speed tiers
 
@@ -68,7 +74,7 @@ Speed is a 3-tier function of how far the room is past the target:
 
 ## Combined heat-pump control
 
-- **CC-11** A combined climate picks one decision for the single entity: **Cool** (Use A/C on & room past the cooling threshold), **Heat** (Use heater on & room past the heating threshold), **Fan Only** (when an override/native-fan condition holds), else **Off**. Both thresholds use the CC-27 hysteresis, keyed on the single entity's reported mode (`cool`/`heat`). Setpoint is the heating target when heating, otherwise the cooling floor (CC-9). For a combined device, **fan-only override is offered for cooling only** (CC-12).
+- **CC-11** A combined climate picks one decision for the single entity: **Cool** (Use A/C on & room past the cooling threshold), **Heat** (Use heater on & room past the heating threshold), **Fan Only** (when an override/native-fan condition holds), else **Off**. Both thresholds use the CC-27 hysteresis, keyed on the single entity's reported mode (`cool`/`heat`). Setpoint is the heating target when heating, or the cooling floor (CC-9) when cooling; no setpoint is sent in fan-only (CC-32). For a combined device, **fan-only override is offered for cooling only** (CC-12).
 
 ## Fan-only override
 
@@ -76,30 +82,59 @@ Speed is a 3-tier function of how far the room is past the target:
   - **Use on, but not actively heating/cooling** → fan-only.
   - **Use off** → fan-only **only if** the room has no standalone fan, *or* its standalone fan's Use toggle is on; otherwise off.
   - Heaters additionally run fan-only **natively** whenever Use heater is on and they're not actively heating (no override needed).
+  - **Multi-fan generalization:** "the room has a standalone fan" means whether **any** fan is configured, and "its standalone fan's Use toggle is on" means whether **any** fan's Use is on (the aggregate `use_fan = any(fan.use)`) — this preserves the single-fan behavior.
 
 ## Standalone fan control
 
-- **CC-13** The fan runs when **Use fan** on **and** the room is past the fan threshold (CC-27 cooling-style hysteresis against target_fan); otherwise it's turned off.
-- **CC-14** While on, speed follows the cooling-style tiers (CC-7) against `target_fan` + fan offsets, mapped to 10/50/100% or the fan's preset modes.
+A room may have a **list** of standalone fans (`fan_entities`, replacing the old
+single `fan_entity`). Each fan has its **own** target temp, its **own** Use toggle,
+and its **own** Fan reverse switch, but all of a room's fans **share** the room's
+fan Medium/High **offsets** and the fan min/max **limits**. Fans are
+**independent** — one may run while another is off. A standalone fan has **two**
+triggers: the room's **temperature** and — when the room has a humidity sensor —
+the room's **humidity** (CC-28..CC-31); the humidity target/offsets are shared by
+all of the room's fans.
+
+Cooling and heating remain **single-device** this round (out of scope). For
+backward compatibility, a pre-existing single-fan room (config key `fan_entity`
+and un-slugged `target_fan_temp` / `use_fan` / `fan_reverse` entities) is
+**migrated** to the list form — its legacy entities are renamed to the slugged
+per-fan keys.
+
+- **CC-13** Each fan runs when **its own Use fan** toggle is on **and** the room is past that fan's temperature threshold (CC-27 cooling-style hysteresis against that fan's `target_fan`) **or the room's humidity threshold (CC-28/CC-29)**; otherwise that fan is turned off. Every fan is evaluated independently against its own target and its own Use.
+- **CC-14** While on, a fan's speed follows the cooling-style tiers (CC-7) against **its own** `target_fan` plus the room's **shared** fan offsets, mapped to 10/50/100% or the fan's preset modes. Because the offsets are shared, each fan's Medium/High thresholds are its own target plus the common offsets. When the humidity trigger is active the commanded speed is the **faster** of this tier and the humidity tier (CC-29).
+
+## Humidity trigger (standalone fans)
+
+A room with a humidity sensor can also run its standalone fans to move damp air.
+Humidity is a **fan-only** concern — it never drives cooling or heating.
+
+- **CC-28** A room with a **humidity sensor** and at least one **standalone fan** gets one room-level **Humidity target** `number` (unit %, range 30–90, default 60) and one shared **Humidity medium/high offset** pair (unit %, range 1–30, defaults 5/10). Humidity thresholds derive as in CC-7 (cooling-style): `medium = target + medium_offset`, `high = target + high_offset`, and the tier comparisons **truncate to whole %** per the CC-5 convention. Humidity affects **standalone fans only** — cooling/heating decisions (CC-9..CC-11) and companion fans remain temperature-only. Rooms without a humidity sensor, or without fans, get no humidity entities and behave exactly as before.
+- **CC-29** Temperature and humidity are **independent triggers** for each standalone fan, combined so they cooperate: a fan (with its Use on) runs when **either** the temperature trigger (CC-13/CC-27) **or** the humidity trigger (CC-30) wants it on, and turns off **only when both decline**. While running, speed is the **faster** of the temperature tier (CC-14) and the humidity tier (room humidity against the CC-28 thresholds).
+- **CC-30** The humidity on/off decision uses an **asymmetric hysteresis deadband** analogous to CC-27, keyed on the fan's reported on/off state (humidity target `H`): once running, keep running while `humidity > H + 0.5`; once stopped, do not restart until `humidity >= H + 2.0`. The wider band (vs. temperature's 0.2/1.0) absorbs %RH sensor noise; the constants are fixed, not configurable.
+
+  Because both triggers share the fan's single on/off state, a fan started by one trigger holds the *other* trigger in its keep-running band too — the fan stops only when temperature is within 0.2 °F of its target (or below) **and** humidity is within 0.5 % of its target (or below). This can only lengthen a run, never cause cycling: any restart still requires a full CC-27/CC-30 restart-threshold crossing.
+- **CC-31** Fail-safe: a missing or unreadable humidity reading disables the humidity trigger (temperature-only behavior, CC-13) — it never suppresses or forces conditioning. An unreadable **temperature** still skips the room's evaluation entirely (existing behavior), so humidity alone never drives control; a working temperature sensor is a prerequisite (documented limitation).
 
 ## Standalone fan direction
 
 A reversible ceiling fan can spin **forward** or **reverse**. Reversibility is
-**auto-detected** live from the fan entity — there is no config-flow toggle.
-Detection checks two signals: the standard HA DIRECTION capability bit
-(`supported_features & FanEntityFeature.DIRECTION`), **or** the presence of a
-`"reverse"` entry in the entity's `preset_modes` list (used by integrations such
-as Dreo that express direction as a preset rather than a native direction feature).
-Each room with a standalone fan gets a **Fan reverse** `switch.*` entity; it is
-created unconditionally (detection at platform setup would race fan integrations
-that load later) and is simply inert for non-reversible fans. Direction control
-applies to the **standalone fan only** — the A/C/heater companion fans are
-excluded by design.
+**auto-detected** live, **per fan**, from each fan entity — there is no
+config-flow toggle. Detection checks two signals: the standard HA DIRECTION
+capability bit (`supported_features & FanEntityFeature.DIRECTION`), **or** the
+presence of a `"reverse"` entry in the entity's `preset_modes` list (used by
+integrations such as Dreo that express direction as a preset rather than a native
+direction feature). **Each** standalone fan gets its **own** **Fan reverse**
+`switch.*` entity (`fan_reverse__<slug>`); it is created unconditionally
+(detection at platform setup would race fan integrations that load later) and is
+simply inert for that fan when it is non-reversible. Direction control applies to
+the **standalone fans only** — the A/C/heater companion fans are excluded by
+design.
 
-- **CC-22** When the standalone fan is **reversible and running**, and its reported direction differs from the requested one (Fan reverse switch on → `reverse`, off → `forward`), the engine emits a set-direction command. For fans with native DIRECTION support the controller calls `fan.set_direction`; for fans that use a `"reverse"` preset the controller calls `fan.set_preset_mode("reverse")` to engage and `fan.set_preset_mode(<forward-preset>)` to disengage (the forward preset is the first non-`"reverse"` entry in the entity's `preset_modes`).
-- **CC-23** Idempotence (CC-19 extension): the direction command is **suppressed when the reported direction already matches** the request. An unknown (`None`) reported direction never matches, so it emits.
-- **CC-24** A **non-reversible** fan never receives a direction command, even when the Fan reverse switch is on.
-- **CC-25** Direction is applied **only while the fan is actively running**: when the fan must start and reverse in the same evaluation, turn-on precedes set-direction; a reverse request while the fan is off emits nothing and takes effect at the next turn-on.
+- **CC-22** When a standalone fan is **reversible and running**, and its reported direction differs from the requested one (**that fan's** Fan reverse switch on → `reverse`, off → `forward`), the engine emits a set-direction command for that fan. For fans with native DIRECTION support the controller calls `fan.set_direction`; for fans that use a `"reverse"` preset the controller calls `fan.set_preset_mode("reverse")` to engage and `fan.set_preset_mode(<forward-preset>)` to disengage (the forward preset is the first non-`"reverse"` entry in the entity's `preset_modes`).
+- **CC-23** Idempotence (CC-19 extension): a fan's direction command is **suppressed when the reported direction already matches** the request. An unknown (`None`) reported direction never matches, so it emits.
+- **CC-24** A **non-reversible** fan never receives a direction command, even when its Fan reverse switch is on.
+- **CC-25** Direction is applied **only while that fan is actively running**: when a fan must start and reverse in the same evaluation, turn-on precedes set-direction; a reverse request while the fan is off emits nothing and takes effect at that fan's next turn-on.
 
 ## Manual mode
 
@@ -120,9 +155,9 @@ watches a room's target/offset numbers; on an invalid combination it **clamps**
 the offending value and raises a **persistent notification** (HA notifications
 tab) — non-blocking, no deprecated notify methods.
 
-- **CC-16** High offset > medium offset (per device).
+- **CC-16** High offset > medium offset (per device, and likewise for the room's **humidity** medium/high offsets — CC-28).
 - **CC-17** **Heating target must stay below cooling target** (when the room has both).
-- **CC-18** A device's `target ± high_offset` must stay within that device's configured min/max limits; the high offset is clamped to fit.
+- **CC-18** A device's `target ± high_offset` must stay within that device's configured min/max limits; the high offset is clamped to fit. The same rule applies to humidity: `humidity_target + humidity_high_offset` must stay **≤ 100 %**, and the humidity high offset is clamped to fit.
 - The validator ignores the echo of its own clamp writes so two rules can't ping-pong a value.
 
 ## Command timing

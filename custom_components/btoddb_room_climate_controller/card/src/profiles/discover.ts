@@ -17,12 +17,15 @@ function entityConfigured(entityId?: string): boolean {
 
 export function routineIsConfigured(routine: RoutineConfig): boolean {
   const r = routine.room;
+  const hasFan = r.fans.some(
+    (f) => entityConfigured(f.tempEntity) || entityConfigured(f.useEntity)
+  );
   return (
     entityConfigured(routine.enabled) &&
     entityConfigured(routine.time) &&
     (entityConfigured(r.cooling) ||
       entityConfigured(r.useCooling) ||
       entityConfigured(r.heating) ||
-      entityConfigured(r.fan))
+      hasFan)
   );
 }

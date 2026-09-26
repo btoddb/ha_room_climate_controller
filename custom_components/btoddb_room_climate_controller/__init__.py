@@ -28,6 +28,7 @@ from .constraints import ConstraintsValidator
 from .controller import RoomController
 from .entity import (
     async_assign_areas,
+    async_migrate_fan_entity_ids,
     async_migrate_profile_subentries,
     resolve_room_entity,
 )
@@ -172,6 +173,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoomClimateConfigEntry) 
         name=entry.title,
         entry_type=dr.DeviceEntryType.SERVICE,
     )
+
+    # Rename pre-#66 single-fan unique_ids to the per-fan slugged form before the
+    # platforms add their per-fan entities (otherwise the new entities claim the
+    # slugged unique_ids first and the rename becomes a no-op).
+    async_migrate_fan_entity_ids(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
