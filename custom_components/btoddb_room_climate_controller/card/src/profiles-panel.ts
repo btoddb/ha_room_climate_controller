@@ -233,12 +233,16 @@ export class RoomClimateProfilesPanel extends LitElement {
         ${room.has_heating !== false
           ? this._renderDeviceRow("Heating", room.useHeating, room.heating)
           : nothing}
-        ${room.has_fan !== false
-          ? this._renderDeviceRow("Fan", room.useFan, room.fan, {
-              label: "Reverse",
-              entityId: room.fanReverse,
-            })
-          : nothing}
+        ${room.fans.map((fan) =>
+          this._renderDeviceRow(
+            fan.label,
+            fan.useEntity,
+            fan.tempEntity,
+            fan.reversible
+              ? { label: "Reverse", entityId: fan.reverseEntity }
+              : undefined
+          )
+        )}
       </div>
     `;
   }

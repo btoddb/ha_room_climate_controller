@@ -8,6 +8,20 @@ export interface WsPresetDevice {
   temp_entity: string | null;
 }
 
+/** One fan's full per-profile preset (use + temp + reverse), resolved to the
+profile's Use switch, Target number, and Reverse switch entity ids. */
+export interface WsFanPreset {
+  slug: string;
+  label: string;
+  use: boolean;
+  temp: number | null;
+  reverse: boolean;
+  reversible: boolean;
+  use_entity: string | null;
+  temp_entity: string | null;
+  reverse_entity: string | null;
+}
+
 export interface WsProfile {
   id: string;
   name: string;
@@ -18,18 +32,43 @@ export interface WsProfile {
   has_heating: boolean;
   has_fan: boolean;
   fan_override: boolean | null;
-  fan_reverse: boolean | null;
   entities: {
     enabled: string | null;
     time: string | null;
     fan_override: string | null;
-    fan_reverse: string | null;
     presets: Record<string, WsPresetDevice>;
+    fan_presets: WsFanPreset[];
   };
 }
 
 export interface WsRoomLive {
   use: string | null;
+  target: string | null;
+  medium_offset: string | null;
+  high_offset: string | null;
+}
+
+/** One fan's live room entities. Each fan owns its Use switch, Target number and
+Reverse switch; `reversible` is detected per fan (CC-22). */
+export interface WsFanEntity {
+  entity_id: string;
+  slug: string;
+  label: string;
+  reversible: boolean;
+  use: string | null;
+  target: string | null;
+  reverse: string | null;
+}
+
+/** Shared fan-speed offset number entities — one pair per room, not per fan. */
+export interface WsFanOffsets {
+  medium_offset: string | null;
+  high_offset: string | null;
+}
+
+/** Room-level humidity target + shared medium/high offsets driving the room's
+fans (CC-28); null unless the room has a humidity sensor and a fan. */
+export interface WsHumidityControl {
   target: string | null;
   medium_offset: string | null;
   high_offset: string | null;
@@ -43,13 +82,10 @@ export interface WsRoom {
   has_heating: boolean;
   has_fan: boolean;
   combined: boolean;
-  /** True when the room's standalone fan supports direction (CC-22). */
-  fan_reversible: boolean;
   entities: {
     manual_mode: string | null;
     ac_fan_only_override: string | null;
     heater_fan_only_override: string | null;
-    fan_reverse: string | null;
     temperature: string | null;
     humidity: string | null;
     power: string | null;
@@ -57,8 +93,14 @@ export interface WsRoom {
     time_range: string | null;
     ac_entity: string | null;
     heater_entity: string | null;
-    fan_entity: string | null;
+    /** All the room's fans; each carries its own use/target/reverse entities. */
+    fans: WsFanEntity[];
+    /** Shared medium/high offsets for the room's fans, or null when no fan. */
+    fan_offsets: WsFanOffsets | null;
+    /** Humidity target/offsets, or null when the room has no humidity control. */
+    humidity_control: WsHumidityControl | null;
     window_sensors: string[];
+    /** Only "cooling"/"heating" now — the "fan" key moved to `fans`. */
     live: Record<string, WsRoomLive>;
   };
 }

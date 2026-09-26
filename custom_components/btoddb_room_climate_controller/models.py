@@ -22,7 +22,8 @@ from .const import (
     CONF_AREA_ID,
     CONF_COMBINED,
     CONF_COMMAND_DELAY,
-    CONF_FAN_ENTITY,
+    CONF_FAN_ENTITIES,
+    CONF_FAN_ENTITY_LEGACY,
     CONF_HAS_AC,
     CONF_HAS_FAN,
     CONF_HAS_HEATER,
@@ -84,6 +85,44 @@ def slugify_profile_id(name: str) -> str:
     return base[:32] or "profile"
 
 
+def fan_slug(entity_id: str) -> str:
+    """Stable slug for a fan entity id, used in per-fan unique_id suffixes."""
+    base = re.sub(r"[^a-z0-9]+", "_", str(entity_id).lower()).strip("_")
+    return base or "fan"
+
+
+# Per-fan ROOM live-entity key builders (unique_id suffixes under room_uid).
+def fan_target_key(slug: str) -> str:
+    """Room per-fan target-temp entity key suffix."""
+    return f"target_fan_temp__{slug}"
+
+
+def fan_use_key(slug: str) -> str:
+    """Room per-fan Use-toggle entity key suffix."""
+    return f"use_fan__{slug}"
+
+
+def fan_reverse_key(slug: str) -> str:
+    """Room per-fan Reverse-switch entity key suffix."""
+    return f"fan_reverse__{slug}"
+
+
+# Per-fan PROFILE preset-entity key builders (suffixes under profile_uid).
+def profile_fan_temp_key(slug: str) -> str:
+    """Profile per-fan preset target-temp entity key suffix."""
+    return f"fan_{slug}"
+
+
+def profile_fan_use_key(slug: str) -> str:
+    """Profile per-fan preset Use-toggle entity key suffix."""
+    return f"use_fan_{slug}"
+
+
+def profile_fan_reverse_key(slug: str) -> str:
+    """Profile per-fan preset Reverse-switch entity key suffix."""
+    return f"fan_reverse_{slug}"
+
+
 def next_profile_id(existing_ids: Iterable[str]) -> str:
     """Return the next 2-digit numeric id not already used."""
     ids = {format_profile_id(pid) for pid in existing_ids}
@@ -112,6 +151,17 @@ def _coerce_window_sensors(data: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(eid for eid in raw if eid)
 
 
+def _coerce_fan_entities(data: Mapping[str, Any]) -> tuple[str, ...]:
+    raw = data.get(CONF_FAN_ENTITIES)
+    if raw is None:
+        raw = data.get(CONF_FAN_ENTITY_LEGACY)  # pre-#66 single-fan key
+    if not raw:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    return tuple(eid for eid in raw if eid)
+
+
 # ---------------------------------------------------------------------------
 # Room model (from a config subentry)
 # ---------------------------------------------------------------------------
@@ -129,7 +179,7 @@ class Room:
     combined: bool
     ac_climate: str | None
     heater_climate: str | None
-    fan_entity: str | None
+    fan_entities: tuple[str, ...]
     ac_fan_entity: str | None
     heater_fan_entity: str | None
     ac_power_switch: str | None
@@ -173,7 +223,7 @@ class Room:
             combined=bool(data.get(CONF_COMBINED, False)),
             ac_climate=data.get(CONF_AC_CLIMATE) or None,
             heater_climate=data.get(CONF_HEATER_CLIMATE) or None,
-            fan_entity=data.get(CONF_FAN_ENTITY) or None,
+            fan_entities=_coerce_fan_entities(data),
             ac_fan_entity=data.get(CONF_AC_FAN_ENTITY) or None,
             heater_fan_entity=data.get(CONF_HEATER_FAN_ENTITY) or None,
             ac_power_switch=data.get(CONF_AC_POWER_SWITCH) or None,
@@ -231,7 +281,7 @@ def describe_room_settings(room: Room) -> str:
             parts.append(f"heater_power_switch={room.heater_power_switch}")
         parts.append(f"heater_fan_only={room.heater_fan_only}")
     if room.has_fan:
-        parts.append(f"fan_entity={room.fan_entity}")
+        parts.append(f"fan_entities={list(room.fan_entities)}")
     parts.append(f"temperature_sensor={room.temperature_sensor}")
     if room.humidity_sensor:
         parts.append(f"humidity_sensor={room.humidity_sensor}")
@@ -261,6 +311,15 @@ class DevicePreset:
 
 
 @dataclass
+class FanPreset:
+    """A profile's per-fan preset: whether to apply it, target temp, and reverse."""
+
+    use: bool = False
+    temp: float = 0.0
+    reverse: bool = False
+
+
+@dataclass
 class Profile:
     """A scheduled climate preset for a room."""
 
@@ -271,8 +330,9 @@ class Profile:
     enabled: bool = True
     time: str | None = None  # "HH:MM"
     fan_override: bool = False
-    fan_reverse: bool = False
+    fan_reverse: bool = False  # legacy single-fan field, read for migration only
     presets: dict[str, DevicePreset] = field(default_factory=dict)
+    fan_presets: dict[str, FanPreset] = field(default_factory=dict)
 
     @classmethod
     def with_defaults(cls, *, profile_id: str, name: str, room: Room) -> Profile:
@@ -284,6 +344,11 @@ class Profile:
             presets={
                 device: DevicePreset(use=False, temp=room.limits[device]["min"])
                 for device in room.devices
+                if device != DEVICE_FAN
+            },
+            fan_presets={
+                fan_slug(eid): FanPreset(use=False, temp=room.limits[DEVICE_FAN]["min"])
+                for eid in room.fan_entities
             },
         )
 
@@ -301,6 +366,10 @@ class Profile:
             "presets": {
                 device: {"use": p.use, "temp": p.temp}
                 for device, p in self.presets.items()
+            },
+            "fan_presets": {
+                slug: {"use": p.use, "temp": p.temp, "reverse": p.reverse}
+                for slug, p in self.fan_presets.items()
             },
         }
 
@@ -323,6 +392,14 @@ class Profile:
                 )
                 for device, p in (data.get("presets") or {}).items()
             },
+            fan_presets={
+                slug: FanPreset(
+                    use=bool(p.get("use", False)),
+                    temp=float(p.get("temp", 0.0)),
+                    reverse=bool(p.get("reverse", False)),
+                )
+                for slug, p in (data.get("fan_presets") or {}).items()
+            },
         )
 
     def ensure_preset(self, device: str) -> DevicePreset:
@@ -341,6 +418,37 @@ class Profile:
             self.presets[device] = preset
         return preset
 
+    def ensure_fan_preset(self, slug: str) -> FanPreset:
+        """Return the fan preset for ``slug``, creating a default one if missing."""
+        preset = self.fan_presets.get(slug)
+        if preset is None:
+            preset = FanPreset()
+            self.fan_presets[slug] = preset
+        return preset
+
+    def migrate_fan_presets(self, room: Room) -> bool:
+        """
+        Convert a legacy single-fan profile to per-fan presets for ``room``'s fans.
+
+        Old profiles stored a single ``presets["fan"]`` (+ profile-level
+        ``fan_reverse``). Seed every fan of the room from that legacy value so the
+        multi-fan profile starts where the single fan was, then drop the legacy
+        ``presets["fan"]``. No-op once ``fan_presets`` is populated or the room has
+        no fans. Returns True if anything changed (so the caller can persist).
+        """
+        if not room.has_fan or self.fan_presets:
+            return False
+        legacy = self.presets.get(DEVICE_FAN)
+        for eid in room.fan_entities:
+            self.fan_presets[fan_slug(eid)] = FanPreset(
+                use=legacy.use if legacy else False,
+                temp=legacy.temp if legacy else room.limits[DEVICE_FAN]["min"],
+                reverse=self.fan_reverse,
+            )
+        changed = bool(room.fan_entities)
+        self.presets.pop(DEVICE_FAN, None)
+        return changed
+
     def reassigned_to(self, room: Room) -> Profile:
         """Return a copy moved to ``room``, re-seeding presets for its devices."""
         presets = {
@@ -348,8 +456,15 @@ class Profile:
                 device, DevicePreset(use=False, temp=room.limits[device]["min"])
             )
             for device in room.devices
+            if device != DEVICE_FAN
         }
-        return replace(self, room=room.key, presets=presets)
+        fan_presets = {
+            fan_slug(eid): self.fan_presets.get(
+                fan_slug(eid), FanPreset(temp=room.limits[DEVICE_FAN]["min"])
+            )
+            for eid in room.fan_entities
+        }
+        return replace(self, room=room.key, presets=presets, fan_presets=fan_presets)
 
 
 # ---------------------------------------------------------------------------

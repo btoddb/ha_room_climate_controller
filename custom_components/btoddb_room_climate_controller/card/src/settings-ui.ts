@@ -6,7 +6,7 @@ import {
   getStateObj,
   setInputNumber,
 } from "./helpers";
-import type { RoomClimateControlConfig } from "./types";
+import type { FanConfig, RoomClimateControlConfig } from "./types";
 
 export interface DeviceSettingsFields {
   title: string;
@@ -17,6 +17,22 @@ export interface DeviceSettingsFields {
   subtractOffsets?: boolean;
   /** Fan reverse switch entity; set only when the fan is reversible (UX-28). */
   reverseToggle?: string;
+}
+
+/** The room's fan settings: one target (+ reverse when reversible) per fan, plus
+the single medium/high offset pair shared across all the room's fans. */
+export interface FanSettingsFields {
+  fans: FanConfig[];
+  mediumOffset: string;
+  highOffset: string;
+}
+
+/** The room's humidity target + shared medium/high offsets (CC-28); they drive
+the room's fans, so the section renders after the Fan section (UX-31). */
+export interface HumiditySettingsFields {
+  target: string;
+  mediumOffset: string;
+  highOffset: string;
 }
 
 function parseNum(hass: HomeAssistant, entityId: string, fallback = 0): number {
@@ -60,23 +76,46 @@ export function buildDeviceSettingsFields(
     });
   }
 
-  if (entityConfigured(config.fan_entity)) {
-    sections.push({
-      title: "Fan",
-      target: config.target_fan,
-      mediumOffset: config.fan_medium_offset,
-      highOffset: config.fan_high_offset,
-      reverseToggle: config.fan_reversible ? config.fan_reverse_toggle : undefined,
-    });
-  }
-
   return sections;
+}
+
+/** Fan settings, or null when the room has no fan. Offsets are shared by all
+fans, so they are surfaced once here rather than per fan. */
+export function buildFanSettingsFields(
+  config: RoomClimateControlConfig
+): FanSettingsFields | null {
+  if (config.fans.length === 0) return null;
+  return {
+    fans: config.fans,
+    mediumOffset: config.fan_medium_offset,
+    highOffset: config.fan_high_offset,
+  };
+}
+
+/** Humidity settings, or null when the room has no humidity control — the
+integration only creates all three entities together (CC-28). */
+export function buildHumiditySettingsFields(
+  config: RoomClimateControlConfig
+): HumiditySettingsFields | null {
+  if (
+    !entityConfigured(config.humidity_target) ||
+    !entityConfigured(config.humidity_medium_offset) ||
+    !entityConfigured(config.humidity_high_offset)
+  ) {
+    return null;
+  }
+  return {
+    target: config.humidity_target,
+    mediumOffset: config.humidity_medium_offset,
+    highOffset: config.humidity_high_offset,
+  };
 }
 
 function renderTargetRow(
   hass: HomeAssistant,
   entityId: string,
-  label: string
+  label: string,
+  unit = "°F"
 ): TemplateResult | typeof nothing {
   const obj = getStateObj(hass, entityId);
   if (!obj) return nothing;
@@ -101,7 +140,7 @@ function renderTargetRow(
             if (!Number.isNaN(n)) setInputNumber(hass, entityId, n);
           }}
         />
-        <span class="settings-unit">°F</span>
+        <span class="settings-unit">${unit}</span>
       </div>
     </div>
   `;
@@ -111,7 +150,8 @@ function renderOffsetSlider(
   hass: HomeAssistant,
   entityId: string,
   label: string,
-  computed: number | null
+  computed: number | null,
+  unit = "°F"
 ): TemplateResult | typeof nothing {
   const obj = getStateObj(hass, entityId);
   if (!obj) return nothing;
@@ -125,7 +165,7 @@ function renderOffsetSlider(
       <div class="settings-row-label-block">
         <span class="settings-row-label">${label}</span>
         ${computed !== null
-          ? html`<span class="settings-computed">→ ${computed.toFixed(0)}°F</span>`
+          ? html`<span class="settings-computed">→ ${computed.toFixed(0)}${unit}</span>`
           : nothing}
       </div>
       <div class="settings-row-control settings-slider-control">
@@ -141,7 +181,7 @@ function renderOffsetSlider(
             if (!Number.isNaN(n)) setInputNumber(hass, entityId, n);
           }}
         />
-        <span class="settings-offset-value">${val}°F</span>
+        <span class="settings-offset-value">${val}${unit}</span>
       </div>
     </div>
   `;
@@ -149,7 +189,8 @@ function renderOffsetSlider(
 
 function renderReverseRow(
   hass: HomeAssistant,
-  entityId: string | undefined
+  entityId: string | undefined,
+  label = "Reverse"
 ): TemplateResult | typeof nothing {
   if (!entityId) return nothing;
   const obj = getStateObj(hass, entityId);
@@ -157,7 +198,7 @@ function renderReverseRow(
 
   return html`
     <div class="settings-row">
-      <span class="settings-row-label">Reverse</span>
+      <span class="settings-row-label">${label}</span>
       <div class="settings-row-control">
         <ha-entity-toggle .hass=${hass} .stateObj=${obj}></ha-entity-toggle>
       </div>
@@ -190,6 +231,62 @@ export function renderDeviceSettingsSection(
       ${renderOffsetSlider(hass, fields.mediumOffset, "Medium offset", medComputed)}
       ${renderOffsetSlider(hass, fields.highOffset, "High offset", highComputed)}
       ${renderReverseRow(hass, fields.reverseToggle)}
+    </div>
+  `;
+}
+
+export function renderFanSettingsSection(
+  hass: HomeAssistant,
+  fields: FanSettingsFields
+): TemplateResult {
+  // The medium/high offsets are shared, so a single "→ X°F" preview is only
+  // unambiguous with exactly one fan; with several fans (different targets) we
+  // drop the preview rather than pick one fan's threshold arbitrarily.
+  const soleTarget = fields.fans.length === 1 ? fields.fans[0].target : undefined;
+  const medComputed = soleTarget
+    ? computedThreshold(hass, soleTarget, fields.mediumOffset, false)
+    : null;
+  const highComputed = soleTarget
+    ? computedThreshold(hass, soleTarget, fields.highOffset, false)
+    : null;
+
+  const multipleFans = fields.fans.length > 1;
+
+  return html`
+    <div class="settings-section">
+      <div class="settings-section-title">Fan</div>
+      ${fields.fans.map(
+        (fan) => html`
+          ${renderTargetRow(hass, fan.target, fan.label)}
+          ${fan.reversible
+            ? renderReverseRow(
+                hass,
+                fan.reverse,
+                multipleFans ? `${fan.label} reverse` : "Reverse"
+              )
+            : nothing}
+        `
+      )}
+      ${renderOffsetSlider(hass, fields.mediumOffset, "Medium offset", medComputed)}
+      ${renderOffsetSlider(hass, fields.highOffset, "High offset", highComputed)}
+    </div>
+  `;
+}
+
+export function renderHumiditySettingsSection(
+  hass: HomeAssistant,
+  fields: HumiditySettingsFields
+): TemplateResult {
+  // Humidity offsets add to the target (damper ⇒ faster), like cooling.
+  const medComputed = computedThreshold(hass, fields.target, fields.mediumOffset, false);
+  const highComputed = computedThreshold(hass, fields.target, fields.highOffset, false);
+
+  return html`
+    <div class="settings-section">
+      <div class="settings-section-title">Humidity</div>
+      ${renderTargetRow(hass, fields.target, "Target", "%")}
+      ${renderOffsetSlider(hass, fields.mediumOffset, "Medium offset", medComputed, "%")}
+      ${renderOffsetSlider(hass, fields.highOffset, "High offset", highComputed, "%")}
     </div>
   `;
 }

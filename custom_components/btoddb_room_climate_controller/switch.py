@@ -12,14 +12,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
+    DEVICE_FAN,
     DEVICE_USE_ICONS,
     KEY_AC_FAN_ONLY,
-    KEY_FAN_REVERSE,
     KEY_HEATER_FAN_ONLY,
     KEY_MANUAL_MODE,
     KEY_PROFILE_ENABLED,
     KEY_PROFILE_FAN_OVERRIDE,
-    KEY_PROFILE_FAN_REVERSE,
     KEY_PROFILE_USE,
     KEY_USE,
     LOGGER_PROFILE,
@@ -27,7 +26,23 @@ from .const import (
     SIGNAL_ADD_PROFILE_ENTITIES,
 )
 from .entity import ProfileRemovalMixin, profile_device_info, room_device_info
-from .models import Profile, Room, profile_uid, room_uid
+from .models import (
+    Profile,
+    Room,
+    fan_reverse_key,
+    fan_slug,
+    fan_use_key,
+    profile_fan_reverse_key,
+    profile_fan_use_key,
+    profile_uid,
+    room_uid,
+)
+
+
+def _fan_label(entity_id: str) -> str:
+    """Human-readable label for a fan entity id (object_id titled)."""
+    return entity_id.rsplit(".", maxsplit=1)[-1].replace("_", " ").title()
+
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
@@ -54,12 +69,31 @@ def _room_specs(room: Room) -> list[_SwitchSpec]:
             name={
                 "cooling": "Use A/C",
                 "heating": "Use heater",
-                "fan": "Use fan",
             }[device],
             icon=DEVICE_USE_ICONS[device],
         )
         for device in room.devices
+        if device != DEVICE_FAN
     ]
+    # Per-fan Use + Reverse. Reversibility is detected live from the entity, which
+    # may not be loaded at platform setup (CC-22); the reverse switch is inert for
+    # non-reversible fans (CC-24).
+    for eid in room.fan_entities:
+        slug = fan_slug(eid)
+        specs.append(
+            _SwitchSpec(
+                key=fan_use_key(slug),
+                name=f"Use {_fan_label(eid)}",
+                icon=DEVICE_USE_ICONS[DEVICE_FAN],
+            )
+        )
+        specs.append(
+            _SwitchSpec(
+                key=fan_reverse_key(slug),
+                name=f"{_fan_label(eid)} reverse",
+                icon="mdi:rotate-left",
+            )
+        )
     specs.append(
         _SwitchSpec(
             key=KEY_MANUAL_MODE,
@@ -81,13 +115,6 @@ def _room_specs(room: Room) -> list[_SwitchSpec]:
                 name="Heater fan-only override",
                 icon="mdi:fan-auto",
             )
-        )
-    # Created for every room with a standalone fan — reversibility is detected
-    # live from the entity, which may not be loaded at platform setup (CC-22);
-    # the switch is inert for non-reversible fans (CC-24).
-    if room.has_fan and room.fan_entity:
-        specs.append(
-            _SwitchSpec(key=KEY_FAN_REVERSE, name="Fan reverse", icon="mdi:rotate-left")
         )
     return specs
 
@@ -119,12 +146,17 @@ async def async_setup_entry(
             return
         entities: list[SwitchEntity] = [
             ProfileEnabledSwitch(entry, profile),
-            *(ProfileUseSwitch(entry, profile, device) for device in room.devices),
+            *(
+                ProfileUseSwitch(entry, profile, device)
+                for device in room.devices
+                if device != DEVICE_FAN
+            ),
         ]
+        for eid in room.fan_entities:
+            entities.append(ProfileFanUseSwitch(entry, profile, eid))
+            entities.append(ProfileFanReverseSwitch(entry, profile, eid))
         if room.has_ac and room.ac_fan_only:
             entities.append(ProfileFanOverrideSwitch(entry, profile))
-        if room.has_fan and room.fan_entity:
-            entities.append(ProfileFanReverseSwitch(entry, profile))
         async_add_entities(entities, config_subentry_id=room.room_id)
 
     for profile in hub.profiles:
@@ -355,18 +387,73 @@ class ProfileFanOverrideSwitch(_BaseProfileSwitch):
         profile.fan_override = bool(self._attr_is_on)
 
 
-class ProfileFanReverseSwitch(_BaseProfileSwitch):
-    """A profile's standalone-fan reverse-direction preset (PR-12)."""
+class ProfileFanUseSwitch(_BaseProfileSwitch):
+    """Whether a profile applies a given fan's preset."""
 
-    def __init__(self, entry: RoomClimateConfigEntry, profile: Profile) -> None:
+    def __init__(
+        self, entry: RoomClimateConfigEntry, profile: Profile, entity_id: str
+    ) -> None:
         """Initialize."""
         super().__init__(entry, profile)
+        self._slug = fan_slug(entity_id)
+        self._label = _fan_label(entity_id)
         self._attr_unique_id = profile_uid(
-            entry.entry_id, profile.id, KEY_PROFILE_FAN_REVERSE
+            entry.entry_id, profile.id, profile_fan_use_key(self._slug)
         )
-        self._attr_name = "Fan reverse"
+        self._attr_name = f"Use {self._label}"
+        self._attr_icon = DEVICE_USE_ICONS[DEVICE_FAN]
+        preset = profile.fan_presets.get(self._slug)
+        self._attr_is_on = bool(preset.use) if preset else False
+
+    async def async_turn_on(self, **_kwargs: Any) -> None:
+        """Enable fan preset."""
+        await super().async_turn_on(**_kwargs)
+        profile = self._entry.runtime_data.get_profile(self._profile_id)
+        room_key = profile.room if profile else "unknown"
+        profile_name = profile.name if profile else "unknown"
+        _PROFILE_LOGGER.info(
+            "[room=%s profile=%s] Profile preset edited: %s use → on",
+            room_key,
+            profile_name,
+            self._label,
+        )
+
+    async def async_turn_off(self, **_kwargs: Any) -> None:
+        """Disable fan preset."""
+        await super().async_turn_off(**_kwargs)
+        profile = self._entry.runtime_data.get_profile(self._profile_id)
+        room_key = profile.room if profile else "unknown"
+        profile_name = profile.name if profile else "unknown"
+        _PROFILE_LOGGER.info(
+            "[room=%s profile=%s] Profile preset edited: %s use → off",
+            room_key,
+            profile_name,
+            self._label,
+        )
+
+    @callback
+    def _apply_to_profile(self, profile: Profile) -> None:
+        preset = profile.ensure_fan_preset(self._slug)
+        preset.use = bool(self._attr_is_on)
+
+
+class ProfileFanReverseSwitch(_BaseProfileSwitch):
+    """A profile's per-fan reverse-direction preset (PR-12)."""
+
+    def __init__(
+        self, entry: RoomClimateConfigEntry, profile: Profile, entity_id: str
+    ) -> None:
+        """Initialize."""
+        super().__init__(entry, profile)
+        self._slug = fan_slug(entity_id)
+        self._label = _fan_label(entity_id)
+        self._attr_unique_id = profile_uid(
+            entry.entry_id, profile.id, profile_fan_reverse_key(self._slug)
+        )
+        self._attr_name = f"{self._label} reverse"
         self._attr_icon = "mdi:rotate-left"
-        self._attr_is_on = profile.fan_reverse
+        preset = profile.fan_presets.get(self._slug)
+        self._attr_is_on = bool(preset.reverse) if preset else False
 
     async def async_turn_on(self, **_kwargs: Any) -> None:
         """Enable fan reverse preset."""
@@ -375,9 +462,10 @@ class ProfileFanReverseSwitch(_BaseProfileSwitch):
         room_key = profile.room if profile else "unknown"
         profile_name = profile.name if profile else "unknown"
         _PROFILE_LOGGER.info(
-            "[room=%s profile=%s] Profile preset edited: fan reverse → on",
+            "[room=%s profile=%s] Profile preset edited: %s reverse → on",
             room_key,
             profile_name,
+            self._label,
         )
 
     async def async_turn_off(self, **_kwargs: Any) -> None:
@@ -387,11 +475,13 @@ class ProfileFanReverseSwitch(_BaseProfileSwitch):
         room_key = profile.room if profile else "unknown"
         profile_name = profile.name if profile else "unknown"
         _PROFILE_LOGGER.info(
-            "[room=%s profile=%s] Profile preset edited: fan reverse → off",
+            "[room=%s profile=%s] Profile preset edited: %s reverse → off",
             room_key,
             profile_name,
+            self._label,
         )
 
     @callback
     def _apply_to_profile(self, profile: Profile) -> None:
-        profile.fan_reverse = bool(self._attr_is_on)
+        preset = profile.ensure_fan_preset(self._slug)
+        preset.reverse = bool(self._attr_is_on)
