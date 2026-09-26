@@ -32,6 +32,8 @@ from .const import (
     LOGGER_SENSOR,
 )
 from .engine import (
+    COOL,
+    HEAT,
     ClimateInfo,
     Command,
     Delay,
@@ -438,20 +440,36 @@ class RoomController:
         """
         Resolve a command against the device's *live* state before it is sent.
 
-        Currently this clamps a ``SetTemperature`` into the device's reported
-        ``min_temp``/``max_temp`` range (CC-9). Used by ``_run`` both at send
+        Currently this re-derives the extreme (device ceiling for heat, floor
+        for cool) from the device's reported live range and clamps a
+        ``SetTemperature`` into it (CC-9/CC-33). Used by ``_run`` both at send
         time and when rendering the CC-L7 description, so the logged value
         always matches what is actually sent. ``_run`` resolves each command in
         order, after any preceding ``SetHvacMode`` in the same evaluation, so
         the live range read here reflects what the device will actually
         validate against.
+
+        Heat/cool commands carry the engine's raw extreme (device ceiling/floor)
+        computed from the *build-time* snapshot, which can be degenerate for a
+        combined heat pump mid mode-transition (e.g. fan_only reporting
+        min/max 0/2). Clamping that raw extreme against the live range only
+        ever pulls it *down* toward the snapshot's stale value, defeating
+        CC-9/CC-33 instead of reaching the live extreme. So the extreme is
+        re-derived from the *live* range by ``hvac_mode`` first — the live
+        ceiling for heat, the live floor for cool — before clamping.
         """
         if isinstance(cmd, SetTemperature):
             state = self.hass.states.get(cmd.entity_id)
             attrs = state.attributes if state else {}
-            temperature = clamp_setpoint(
-                cmd.temperature, attrs.get("min_temp"), attrs.get("max_temp")
-            )
+            lo = attrs.get("min_temp")
+            hi = attrs.get("max_temp")
+            if cmd.hvac_mode == HEAT and hi is not None:
+                base = int(hi)  # CC-33: re-derive ceiling from live range
+            elif cmd.hvac_mode == COOL and lo is not None:
+                base = round(lo)  # CC-9: re-derive floor from live range
+            else:
+                base = cmd.temperature
+            temperature = clamp_setpoint(base, lo, hi)
             if temperature != cmd.temperature:
                 return replace(cmd, temperature=temperature)
         return cmd

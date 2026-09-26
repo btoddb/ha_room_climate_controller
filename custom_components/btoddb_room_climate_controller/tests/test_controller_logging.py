@@ -418,3 +418,119 @@ def test_run_skips_set_temperature_when_resolved_value_matches_memory():
         ("climate", "set_fan_mode", {"entity_id": entity_id, "fan_mode": "low"}),
     ]
     assert ctrl._last_commanded_setpoints[entity_id] == 63
+
+
+def test_run_skips_set_temperature_heat_when_resolved_value_matches_memory():
+    """
+    Heat twin of ``test_run_skips_set_temperature_when_resolved_value_matches_memory``.
+
+    Models a split heater (CC-33) already reporting ``heat`` whose
+    *build-time* ``ClimateInfo`` snapshot still holds a degenerate range
+    (``min_temp=0``/``max_temp=2``, as can linger mid mode-transition), so the
+    engine's raw ceiling is 2. ``_resolve_command`` must re-derive the ceiling
+    from the device's *live* heat-mode range (60..86) read at resolve time
+    rather than merely clamping the raw value downward — re-deriving lands on
+    85, exactly what memory already has, so the controller drops the send.
+    """
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60, "max_temp": 86})})
+    room = _room()
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+    ctrl._last_commanded_setpoints[entity_id] = 85
+    ctrl._build_inputs = lambda: _inputs(
+        heater=_ac_climate(
+            entity_id=entity_id,
+            hvac_mode="heat",
+            hvac_modes=("off", "heat"),
+            min_temp=0.0,
+            max_temp=2.0,
+        ),
+        use_heater=True,
+        room_temp=60.0,
+        target_heating=68.0,
+        command_delay_ms=0,
+        power_on_delay_ms=0,
+    )
+
+    asyncio.run(ctrl._run("test"))
+
+    assert hass.services.calls == []
+
+
+def test_run_sends_live_ceiling_heat_when_no_memory():
+    """
+    Heat twin of the above, without memory: must send the *live* ceiling (85).
+
+    Without the CC-33 re-derivation fix, ``_resolve_command`` would only
+    clamp the raw build-time value (2) downward into the live range, sending
+    61 °F instead of 85 °F and defeating the feature.
+    """
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60, "max_temp": 86})})
+    room = _room()
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+    ctrl._build_inputs = lambda: _inputs(
+        heater=_ac_climate(
+            entity_id=entity_id,
+            hvac_mode="heat",
+            hvac_modes=("off", "heat"),
+            min_temp=0.0,
+            max_temp=2.0,
+        ),
+        use_heater=True,
+        room_temp=60.0,
+        target_heating=68.0,
+        command_delay_ms=0,
+        power_on_delay_ms=0,
+    )
+
+    asyncio.run(ctrl._run("test"))
+
+    assert hass.services.calls == [
+        (
+            "climate",
+            "set_temperature",
+            {"entity_id": entity_id, "temperature": 85, "hvac_mode": "heat"},
+        ),
+    ]
+    assert ctrl._last_commanded_setpoints[entity_id] == 85
+
+
+# -- CC-9/CC-33 ``_resolve_command`` edge cases ------------------------------
+def test_resolve_command_heat_falls_back_to_raw_when_live_max_temp_missing():
+    """
+    CC-33: falls back to the raw commanded value when there's no live ceiling.
+
+    With no live ``max_temp`` to re-derive the ceiling from,
+    ``_resolve_command`` falls back to the raw commanded value — still
+    clamped against the live ``min_temp`` when the device reports one.
+    """
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60})})
+    room = _room()
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+
+    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
+
+    assert resolved.temperature == 61
+
+
+def test_resolve_command_cool_rederives_from_live_min_when_snapshot_min_is_higher():
+    """
+    CC-9: re-derives the floor from live ``min_temp``, not a stale snapshot.
+
+    A stale build-time snapshot with a higher ``min_temp`` than the device's
+    live range (e.g. mid mode-transition) must not pin the resolved setpoint
+    to that stale value. ``_resolve_command`` re-derives the floor from the
+    *live* ``min_temp`` (``round(lo)``) instead of merely clamping the raw
+    command, which here (70, already above ``lo + 1``) would pass through a
+    naive clamp untouched.
+    """
+    entity_id = "climate.office_ac"
+    hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 60})})
+    room = _room()
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+
+    resolved = ctrl._resolve_command(SetTemperature(entity_id, 70, "cool"))
+
+    assert resolved.temperature == 61

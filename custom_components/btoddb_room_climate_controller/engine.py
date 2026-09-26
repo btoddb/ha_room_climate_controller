@@ -285,17 +285,32 @@ class EngineInputs:
         """Return the AC climate setpoint (device min or 65 °F floor)."""
         # The engine controls comfort via fan speed, so the climate's own target
         # is driven to its lowest settable value (max cooling), or 65 °F when the
-        # device doesn't report a min_temp. The controller re-clamps this to the
-        # device's *live* range at send time (see clamp_setpoint / CC-9), since
-        # the range can be mode-dependent and reported in whole °F rounded from
-        # the device's native unit.
+        # device doesn't report a min_temp. The controller re-derives this floor
+        # from the device's *live* range at send time and clamps it (see
+        # clamp_setpoint / CC-9), since the range can be mode-dependent and
+        # reported in whole °F rounded from the device's native unit. Mirrored
+        # for heating by ``heater_setpoint_int`` (CC-33), which drives the
+        # ceiling instead of the floor.
         min_temp = self.ac.min_temp if self.ac else None
         return round(min_temp if min_temp is not None else 65)
 
     @property
-    def target_heating_int(self) -> int:
-        """Return the heating target truncated to whole degrees."""
-        return int(self.target_heating)
+    def heater_setpoint_int(self) -> int:
+        """Return the heating climate setpoint (device max or 85 °F ceiling)."""
+        # The room-side on/off decision (CC-27 hysteresis against target_heating)
+        # is the sole authority for starting/stopping heat, so the climate's own
+        # target is driven to its highest settable value (max heating), or 85 °F
+        # when the device doesn't report a max_temp — this keeps the device's
+        # internal thermostat from stopping heat early. The 85 °F fallback
+        # mirrors cooling's 65 °F floor (CC-9). The controller re-derives this
+        # ceiling from the device's *live* range at send time and clamps it
+        # (see clamp_setpoint / CC-33).
+        # Unlike cooling's round(min_temp) (rounding a floor up is inward/safe),
+        # a ceiling is truncated with int() (CC-5): rounding it up would be the
+        # unsafe direction, risking a value the device rejects as out of range.
+        climate = self.ac if self.combined else self.heater
+        max_temp = climate.max_temp if climate else None
+        return int(max_temp if max_temp is not None else 85)
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +495,7 @@ def _combined(inp: EngineInputs, out: _Out) -> None:  # noqa: PLR0912
     else:
         decision = OFF
 
-    target = inp.target_heating_int if decision == HEAT else inp.ac_setpoint_int
+    target = inp.heater_setpoint_int if decision == HEAT else inp.ac_setpoint_int
     current = ac.hvac_mode
 
     if inp.ac_power and decision in (COOL, HEAT, FAN_ONLY) and not inp.ac_power.is_on:
@@ -630,11 +645,15 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
             TurnOffClimate(heater.entity_id),
         )
     desired_setpoint = clamp_setpoint(
-        inp.target_heating_int, heater.min_temp, heater.max_temp
+        inp.heater_setpoint_int, heater.min_temp, heater.max_temp
     )
     # CC-32: setpoint is meaningless in fan-only, and devices report
     # mode-dependent (sometimes degenerate) ranges there — only send it while
-    # actively conditioning.
+    # actively conditioning. The gate compares the snapshot-clamped
+    # desired_setpoint against memory, while SetTemperature below carries the
+    # raw (unclamped) int — the controller re-derives the extreme from the
+    # live range and clamps at send time, then stores the resolved value
+    # (CC-9/CC-33).
     if (
         decision == HEAT
         and heater.supports_set_temp
@@ -642,7 +661,7 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
             heater.current_setpoint, desired_setpoint, heater.last_commanded_setpoint
         )
     ):
-        out.add(SetTemperature(heater.entity_id, inp.target_heating_int, decision))
+        out.add(SetTemperature(heater.entity_id, inp.heater_setpoint_int, decision))
     if inp.heater_power and decision == OFF and inp.heater_power.is_on:
         out.add(SwitchTurnOff(inp.heater_power.entity_id))
 
