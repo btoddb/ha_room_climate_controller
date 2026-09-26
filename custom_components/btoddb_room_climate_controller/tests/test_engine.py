@@ -310,7 +310,8 @@ def test_combined_heat_pump_heats():
         )
     )
     assert any(isinstance(c, SetHvacMode) and c.hvac_mode == "heat" for c in cmds)
-    assert any(isinstance(c, SetTemperature) and c.temperature == 68 for c in cmds)
+    # CC-33: setpoint is driven to the 85 °F ceiling fallback, not target_heating.
+    assert any(isinstance(c, SetTemperature) and c.temperature == 85 for c in cmds)
 
 
 def test_standalone_fan_medium():
@@ -517,7 +518,7 @@ def test_combined_no_redundant_fan_mode():
                 fan_mode="high",
                 hvac_modes=("off", "cool", "heat"),
                 fan_modes=("low", "high"),
-                current_setpoint=68.0,
+                current_setpoint=85.0,
             ),
             use_ac=True,
             use_heater=True,
@@ -531,7 +532,11 @@ def test_combined_no_redundant_fan_mode():
 
 
 def test_split_heater_heats():
-    """Heater-alone (no AC, not combined) drives to HEAT with the heating target."""
+    """
+    Heater-alone (no AC, not combined) drives to HEAT with the CC-33 ceiling.
+
+    max_temp is unreported here (None), so the setpoint falls back to 85 °F.
+    """
     cmds = compute_commands(
         _base(
             heater=_climate(
@@ -543,7 +548,7 @@ def test_split_heater_heats():
         )
     )
     assert any(isinstance(c, SetHvacMode) and c.hvac_mode == "heat" for c in cmds)
-    assert any(isinstance(c, SetTemperature) and c.temperature == 68 for c in cmds)
+    assert any(isinstance(c, SetTemperature) and c.temperature == 85 for c in cmds)
 
 
 def test_combined_off_when_uses_disabled():
@@ -589,11 +594,11 @@ def test_set_temperature_skipped_when_setpoint_already_correct():
     )
     assert any(isinstance(c, SetTemperature) for c in cmds_wrong)
 
-    # Split heater: setpoint already correct, no SetTemperature needed.
+    # Split heater: setpoint already at the CC-33 ceiling, no SetTemperature needed.
     cmds_heat = compute_commands(
         _base(
             heater=_climate(
-                hvac="heat", hvac_modes=("off", "heat"), current_setpoint=68.0
+                hvac="heat", hvac_modes=("off", "heat"), current_setpoint=85.0
             ),
             use_heater=True,
             room_temp=60.0,
@@ -602,14 +607,15 @@ def test_set_temperature_skipped_when_setpoint_already_correct():
     )
     assert not any(isinstance(c, SetTemperature) for c in cmds_heat)
 
-    # Combined heat pump: setpoint already correct, no SetTemperature needed.
+    # Combined heat pump: setpoint already at the CC-33 ceiling, no
+    # SetTemperature needed.
     cmds_combined = compute_commands(
         _base(
             combined=True,
             ac=_climate(
                 hvac="heat",
                 hvac_modes=("off", "cool", "heat"),
-                current_setpoint=68.0,
+                current_setpoint=85.0,
             ),
             use_ac=True,
             use_heater=True,
@@ -664,14 +670,21 @@ def test_split_ac_setpoint_still_emitted_when_genuinely_off():
 
 
 def test_split_heater_setpoint_idempotent_at_clamped_value():
-    """CC-9: same idempotency fix as the split A/C case, for the heater branch."""
+    """
+    CC-33: dedup compares against the *clamped* ceiling, not the raw one.
+
+    max_temp=84 means the engine's raw target is 84 (the CC-33 ceiling), but
+    the controller's send-time clamp (CC-9's 1° margin) means the device will
+    actually report 83. Without comparing against the clamped value, this
+    loops forever (mirrors issue #28's cooling case, split heater branch).
+    """
     cmds = compute_commands(
         _base(
             heater=_climate(
                 hvac="heat",
                 hvac_modes=("off", "heat"),
-                min_temp=65.0,
-                current_setpoint=66.0,
+                max_temp=84.0,
+                current_setpoint=83.0,
             ),
             use_heater=True,
             room_temp=60.0,
@@ -682,15 +695,15 @@ def test_split_heater_setpoint_idempotent_at_clamped_value():
 
 
 def test_combined_setpoint_idempotent_at_clamped_value():
-    """CC-9: same idempotency fix as the split A/C case, for the combined branch."""
+    """CC-33: same idempotency fix as the split heater case, for the combined branch."""
     cmds = compute_commands(
         _base(
             combined=True,
             ac=_climate(
                 hvac="heat",
                 hvac_modes=("off", "cool", "heat"),
-                min_temp=65.0,
-                current_setpoint=66.0,
+                max_temp=84.0,
+                current_setpoint=83.0,
             ),
             use_ac=True,
             use_heater=True,
@@ -747,7 +760,7 @@ def test_split_heater_setpoint_not_resent_when_unknown_and_memory_matches():
                 hvac="heat",
                 hvac_modes=("off", "heat"),
                 current_setpoint=None,
-                last_commanded_setpoint=68,  # matches target_heating
+                last_commanded_setpoint=85,  # matches the CC-33 ceiling
             ),
             use_heater=True,
             room_temp=60.0,
@@ -766,7 +779,7 @@ def test_combined_setpoint_not_resent_when_unknown_and_memory_matches():
                 hvac="heat",
                 hvac_modes=("off", "cool", "heat"),
                 current_setpoint=None,
-                last_commanded_setpoint=68,  # matches target_heating
+                last_commanded_setpoint=85,  # matches the CC-33 ceiling
             ),
             use_ac=True,
             use_heater=True,
@@ -848,15 +861,17 @@ def test_setpoint_memory_match_trusted_absolutely_no_drift_resend():
     assert not any(isinstance(c, SetTemperature) for c in cmds)
 
 
-def test_setpoint_genuine_target_change_always_sends_heat():
+def test_setpoint_room_heating_target_change_alone_sends_nothing_heat():
     """
-    CC-19 beep-fix gap 1: a genuine target change must not be swallowed.
+    CC-33 headline: a room heating-target change alone sends nothing.
 
-    Heating target moves 65 -> 66 °F. ``last_commanded_setpoint`` (65) no
-    longer matches the newly desired value (66), so the change sends exactly
-    once regardless of how close the device's stale echo (65.3) happens to
-    sit to the *old* target — a pure tolerance compare against the echo would
-    have missed this. Covers the HEAT branch of the memory-mismatch path.
+    target_heating is never sent to a device, so a heating-target change
+    alone triggers NO SetTemperature. max_temp is unreported (None -> 85 °F
+    fallback), memory already matches 85, and the room heating target moves
+    68 -> 72 °F (decision stays Heat). Since the commanded setpoint is the
+    device ceiling, not target_heating, the desired value is unchanged and
+    memory dedup (CC-19) suppresses the send — this is the whole point of
+    CC-33's redesign.
     """
     cmds = compute_commands(
         _base(
@@ -864,17 +879,44 @@ def test_setpoint_genuine_target_change_always_sends_heat():
                 hvac="heat",
                 hvac_modes=("off", "heat"),
                 entity_id="climate.heater",
-                current_setpoint=65.3,
-                last_commanded_setpoint=65,
+                current_setpoint=85.3,
+                last_commanded_setpoint=85,
             ),
             use_heater=True,
             room_temp=60.0,
-            target_heating=66.0,
+            target_heating=72.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds)
+
+
+def test_setpoint_genuine_max_temp_change_sends_heat():
+    """
+    CC-33: a genuine change to the device's reported max_temp is not swallowed.
+
+    Memory (84) no longer matches the newly desired *clamped* ceiling (86,
+    per CC-9's 1° margin on the new max_temp of 87), so the change sends
+    exactly once. The raw ceiling (87) is what's actually emitted — the
+    controller live-clamps it at send time.
+    """
+    cmds = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                entity_id="climate.heater",
+                max_temp=87.0,
+                current_setpoint=84.3,
+                last_commanded_setpoint=84,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
         )
     )
     temp_cmds = [c for c in cmds if isinstance(c, SetTemperature)]
     assert len(temp_cmds) == 1
-    assert temp_cmds[0].temperature == 66
+    assert temp_cmds[0].temperature == 87
 
 
 def test_setpoint_no_memory_fallback_uses_tolerance():
@@ -954,8 +996,8 @@ def test_combined_setpoint_memory_match_trusts_echo_heating():
             ac=_climate(
                 hvac="heat",
                 hvac_modes=("off", "cool", "heat"),
-                current_setpoint=68.9,
-                last_commanded_setpoint=68,
+                current_setpoint=85.9,
+                last_commanded_setpoint=85,
             ),
             use_ac=True,
             use_heater=True,
@@ -964,6 +1006,140 @@ def test_combined_setpoint_memory_match_trusts_echo_heating():
         )
     )
     assert not any(isinstance(c, SetTemperature) for c in cmds)
+
+
+def test_split_heater_ceiling_setpoint_uses_reported_max():
+    """CC-33: a heater reporting a max_temp is driven to that raw value, not 85."""
+    cmds = compute_commands(
+        _base(
+            heater=_climate(hvac="heat", hvac_modes=("off", "heat"), max_temp=86.0),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+        )
+    )
+    temp_cmds = [c for c in cmds if isinstance(c, SetTemperature)]
+    assert len(temp_cmds) == 1
+    assert temp_cmds[0].temperature == 86
+
+    # Memory already at the clamped desired value (85, per CC-9's 1° margin
+    # pulling the 86 max inward) -> no resend.
+    cmds_memory = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                max_temp=86.0,
+                last_commanded_setpoint=85,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_memory)
+
+
+def test_split_heater_min_clamp_lifts_fallback_ceiling():
+    """
+    CC-33: the dedup gate clamps the 85 °F fallback up when it's below live min.
+
+    A heater reporting min_temp=88 and no max_temp desired-clamps the 85 °F
+    fallback ceiling up to 89 (min + 1, CC-9's inward margin). The raw
+    emitted value is still the unclamped 85 (the controller live-clamps at
+    send time), but the engine's own dedup gate compares memory against the
+    clamped 89.
+    """
+    cmds = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="heat", hvac_modes=("off", "heat"), min_temp=88.0, max_temp=None
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+        )
+    )
+    temp_cmds = [c for c in cmds if isinstance(c, SetTemperature)]
+    assert len(temp_cmds) == 1
+    assert temp_cmds[0].temperature == 85  # raw, unclamped 85 °F fallback
+
+    # Memory already at the clamped desired value (89) -> no resend.
+    cmds_memory = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                min_temp=88.0,
+                max_temp=None,
+                last_commanded_setpoint=89,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_memory)
+
+
+def test_combined_asymmetric_setpoint_min_when_cool_max_when_heat():
+    """
+    CC-9/CC-33: a single combined entity's setpoint is asymmetric by decision.
+
+    Same climate (min_temp=62, max_temp=86): Cool drives to the min (raw 62),
+    Heat drives to the max (raw 86) — two separate compute_commands calls.
+    """
+    cool_cmds = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="off",
+                hvac_modes=("off", "cool", "heat"),
+                min_temp=62.0,
+                max_temp=86.0,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+            target_cooling=72.0,
+        )
+    )
+    cool_temp_cmds = [c for c in cool_cmds if isinstance(c, SetTemperature)]
+    assert len(cool_temp_cmds) == 1
+    assert cool_temp_cmds[0].temperature == 62
+
+    heat_cmds = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="off",
+                hvac_modes=("off", "cool", "heat"),
+                min_temp=62.0,
+                max_temp=86.0,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+        )
+    )
+    heat_temp_cmds = [c for c in heat_cmds if isinstance(c, SetTemperature)]
+    assert len(heat_temp_cmds) == 1
+    assert heat_temp_cmds[0].temperature == 86
+
+
+def test_heater_ceiling_celsius_round_trip():
+    """
+    CC-33: clamp_setpoint pulls the heating ceiling 1° inward, mirroring CC-9.
+
+    A 30 °C max reports as 86 °F. Sending 86 °F back would round-trip to
+    right at the limit, so the clamp pulls it down to 85 °F, which as °C
+    ((85 - 32) * 5 / 9 = 29.4) is safely inside the 30 °C limit.
+    """
+    assert clamp_setpoint(86, 50, 86) == 85
+    # An over-max build-time value (e.g. the 85 °F fallback exceeding a lower
+    # live max_temp) also clamps down to the same 1 °F inward ceiling.
+    assert clamp_setpoint(200, 50, 86) == 85
+    # A value already safely inside the range is left untouched.
+    assert clamp_setpoint(70, 50, 86) == 70
 
 
 def test_fan_only_setpoint_gate_skips_even_when_unknown_and_no_memory():
