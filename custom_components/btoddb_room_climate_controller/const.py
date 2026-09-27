@@ -100,6 +100,11 @@ DEFAULT_GRAPH_TIME_RANGE: Final = "24"
 CONF_AC_FAN_ONLY: Final = "ac_fan_only_override"
 CONF_HEATER_FAN_ONLY: Final = "heater_fan_only_override"
 
+# CC-34: optional per-room cap on the heating ceiling — the device's true max
+# settable °F, for devices whose integration advertises a wider max_temp than
+# the device accepts (e.g. smart_envi advertising HA's default 95).
+CONF_HEATER_MAX_SETPOINT: Final = "heater_max_setpoint"
+
 # Per-device preset limits {min,max}
 CONF_LIMITS: Final = "limits"
 

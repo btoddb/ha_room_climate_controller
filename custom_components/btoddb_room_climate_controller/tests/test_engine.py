@@ -1142,6 +1142,200 @@ def test_heater_ceiling_celsius_round_trip():
     assert clamp_setpoint(70, 50, 86) == 70
 
 
+# -- CC-34 heater max setpoint override --------------------------------------
+def test_heater_max_override_caps_advertised_ceiling():
+    """
+    CC-34: the production scenario — smart_envi advertises a wider max_temp.
+
+    Advertised max_temp is 95, but heater_max_setpoint=86 (the device's true
+    max) caps the ceiling. The raw emitted value is 86 (heater_setpoint_int),
+    while the gate compares the *clamped* 85 against memory — so once memory
+    holds 85, no further SetTemperature is emitted.
+    """
+    cmds = compute_commands(
+        _base(
+            heater=_climate(hvac="heat", hvac_modes=("off", "heat"), max_temp=95.0),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=86,
+        )
+    )
+    temp_cmds = [c for c in cmds if isinstance(c, SetTemperature)]
+    assert len(temp_cmds) == 1
+    assert temp_cmds[0].temperature == 86
+
+    cmds_with_memory = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                max_temp=95.0,
+                last_commanded_setpoint=85,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=86,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_with_memory)
+
+
+def test_heater_max_override_above_advertised_max_is_inert():
+    """CC-34: an override above the advertised max changes nothing."""
+    cmds_with_override = compute_commands(
+        _base(
+            heater=_climate(hvac="heat", hvac_modes=("off", "heat"), max_temp=86.0),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=90,
+        )
+    )
+    cmds_without_override = compute_commands(
+        _base(
+            heater=_climate(hvac="heat", hvac_modes=("off", "heat"), max_temp=86.0),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+        )
+    )
+    with_temp = [c for c in cmds_with_override if isinstance(c, SetTemperature)]
+    without_temp = [c for c in cmds_without_override if isinstance(c, SetTemperature)]
+    assert with_temp[0].temperature == without_temp[0].temperature == 86
+
+
+def test_heater_max_override_caps_the_85_fallback():
+    """CC-34: with no advertised max_temp, the override replaces the 85 °F fallback."""
+    cmds = compute_commands(
+        _base(
+            heater=_climate(hvac="heat", hvac_modes=("off", "heat"), max_temp=None),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=80,
+        )
+    )
+    temp_cmds = [c for c in cmds if isinstance(c, SetTemperature)]
+    assert len(temp_cmds) == 1
+    assert temp_cmds[0].temperature == 80
+
+    cmds_with_memory = compute_commands(
+        _base(
+            heater=_climate(
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                max_temp=None,
+                last_commanded_setpoint=79,  # matches the CC-33 1°F-inward clamp
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=80,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in cmds_with_memory)
+
+
+def test_combined_heater_max_override_caps_heat_not_cool():
+    """CC-34: a combined heat pump's override caps Heat only; Cool is unaffected."""
+    heat_cmds = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="off",
+                hvac_modes=("off", "cool", "heat"),
+                min_temp=62.0,
+                max_temp=95.0,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=86,
+        )
+    )
+    heat_temp_cmds = [c for c in heat_cmds if isinstance(c, SetTemperature)]
+    assert len(heat_temp_cmds) == 1
+    assert heat_temp_cmds[0].temperature == 86
+
+    cool_cmds = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="off",
+                hvac_modes=("off", "cool", "heat"),
+                min_temp=62.0,
+                max_temp=95.0,
+            ),
+            use_ac=True,
+            room_temp=80.0,
+            target_cooling=72.0,
+            heater_max_setpoint=86,
+        )
+    )
+    cool_temp_cmds = [c for c in cool_cmds if isinstance(c, SetTemperature)]
+    assert len(cool_temp_cmds) == 1
+    assert cool_temp_cmds[0].temperature == 62
+
+    heat_cmds_with_memory = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="heat",
+                hvac_modes=("off", "cool", "heat"),
+                min_temp=62.0,
+                max_temp=95.0,
+                last_commanded_setpoint=85,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=86,
+        )
+    )
+    assert not any(isinstance(c, SetTemperature) for c in heat_cmds_with_memory)
+
+
+def test_combined_heater_max_override_does_not_rescue_degenerate_snapshot():
+    """
+    CC-34/CC-19: the override caps (never raises) a degenerate build-time snapshot.
+
+    Mid a combined heat pump's mode transition, the build-time snapshot's
+    ``max_temp`` can be degenerate (e.g. 2.0, echoing a stale fan_only range).
+    ``heater_max`` is ``min(advertised, override)``, so a low advertised value
+    still wins even with ``heater_max_setpoint=86`` set — the override is a
+    ceiling *cap*, not a floor, and cannot rescue a bogus-low snapshot. The
+    engine therefore still emits the raw degenerate value (2), and the gate's
+    clamped desired (1) doesn't match ``last_commanded_setpoint`` (85, held
+    over from a prior, sane evaluation) — so a ``SetTemperature`` IS emitted
+    here, at the pure-engine level. This snapshot-vs-live divergence is
+    exactly what the controller's live re-derivation and resolved-vs-memory
+    skip (``test_controller_logging.py``'s CC-19 tests) absorb before
+    anything reaches the device — the engine alone has no way to tell the
+    snapshot is stale.
+    """
+    cmds = compute_commands(
+        _base(
+            combined=True,
+            ac=_climate(
+                hvac="heat",
+                hvac_modes=("off", "cool", "heat"),
+                min_temp=0.0,
+                max_temp=2.0,
+                last_commanded_setpoint=85,
+            ),
+            use_heater=True,
+            room_temp=60.0,
+            target_heating=68.0,
+            heater_max_setpoint=86,
+        )
+    )
+    temp_cmds = [c for c in cmds if isinstance(c, SetTemperature)]
+    assert len(temp_cmds) == 1
+    assert temp_cmds[0].temperature == 2  # raw heater_setpoint_int: min(2.0, 86) = 2.0
+
+
 def test_fan_only_setpoint_gate_skips_even_when_unknown_and_no_memory():
     """
     CC-19/CC-32 interaction (reviewer finding).

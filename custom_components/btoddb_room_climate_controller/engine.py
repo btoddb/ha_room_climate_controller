@@ -258,6 +258,11 @@ class EngineInputs:
     humidity_target: float | None = None
     humidity_medium: float | None = None  # absolute: target + medium offset
     humidity_high: float | None = None  # absolute: target + high offset
+    # CC-34: configured cap on the heating ceiling (device's true max settable
+    # °F); None when unset. Caps the advertised max_temp before CC-33's ceiling
+    # derivation and the CC-32/CC-19 gate's clamp, so gate and send-time
+    # resolution agree.
+    heater_max_setpoint: int | None = None
 
     # derived helpers ----------------------------------------------------
     @property
@@ -295,6 +300,17 @@ class EngineInputs:
         return round(min_temp if min_temp is not None else 65)
 
     @property
+    def heater_max(self) -> float | None:
+        """Effective heating ceiling source: advertised max capped by CC-34."""
+        climate = self.ac if self.combined else self.heater
+        max_temp = climate.max_temp if climate else None
+        if self.heater_max_setpoint is None:
+            return max_temp
+        if max_temp is None:
+            return float(self.heater_max_setpoint)
+        return min(max_temp, float(self.heater_max_setpoint))
+
+    @property
     def heater_setpoint_int(self) -> int:
         """Return the heating climate setpoint (device max or 85 °F ceiling)."""
         # The room-side on/off decision (CC-27 hysteresis against target_heating)
@@ -308,8 +324,9 @@ class EngineInputs:
         # Unlike cooling's round(min_temp) (rounding a floor up is inward/safe),
         # a ceiling is truncated with int() (CC-5): rounding it up would be the
         # unsafe direction, risking a value the device rejects as out of range.
-        climate = self.ac if self.combined else self.heater
-        max_temp = climate.max_temp if climate else None
+        # CC-34: the device max is first capped by the configured
+        # heater_max_setpoint override (see ``heater_max``).
+        max_temp = self.heater_max
         return int(max_temp if max_temp is not None else 85)
 
 
@@ -508,7 +525,9 @@ def _combined(inp: EngineInputs, out: _Out) -> None:  # noqa: PLR0912
             Delay(inp.command_delay_ms),
             TurnOffClimate(ac.entity_id),
         )
-    desired_setpoint = clamp_setpoint(target, ac.min_temp, ac.max_temp)
+    desired_setpoint = clamp_setpoint(
+        target, ac.min_temp, inp.heater_max if decision == HEAT else ac.max_temp
+    )
     # CC-32: setpoint is meaningless in fan-only, and devices report
     # mode-dependent (sometimes degenerate) ranges there — only send it while
     # actively conditioning.
@@ -645,7 +664,7 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
             TurnOffClimate(heater.entity_id),
         )
     desired_setpoint = clamp_setpoint(
-        inp.heater_setpoint_int, heater.min_temp, heater.max_temp
+        inp.heater_setpoint_int, heater.min_temp, inp.heater_max
     )
     # CC-32: setpoint is meaningless in fan-only, and devices report
     # mode-dependent (sometimes degenerate) ranges there — only send it while
@@ -653,7 +672,8 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
     # desired_setpoint against memory, while SetTemperature below carries the
     # raw (unclamped) int — the controller re-derives the extreme from the
     # live range and clamps at send time, then stores the resolved value
-    # (CC-9/CC-33).
+    # (CC-9/CC-33). The CC-34 cap is applied to both this gate clamp and the
+    # controller's send-time resolution, so CC-19 memory stays self-consistent.
     if (
         decision == HEAT
         and heater.supports_set_temp

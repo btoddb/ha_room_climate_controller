@@ -51,6 +51,7 @@ def _room(**overrides):
         },
         "command_delay": 1.0,
         "power_on_delay": 2.0,
+        "heater_max_setpoint": None,
     }
     defaults.update(overrides)
     return models.Room(**defaults)

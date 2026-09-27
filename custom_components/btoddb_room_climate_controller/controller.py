@@ -457,12 +457,23 @@ class RoomController:
         CC-9/CC-33 instead of reaching the live extreme. So the extreme is
         re-derived from the *live* range by ``hvac_mode`` first — the live
         ceiling for heat, the live floor for cool — before clamping.
+
+        CC-34: while heating, the configured ``heater_max_setpoint`` override
+        caps the live ceiling before it's used, so this re-derivation and the
+        engine's gate clamp agree.
         """
         if isinstance(cmd, SetTemperature):
             state = self.hass.states.get(cmd.entity_id)
             attrs = state.attributes if state else {}
             lo = attrs.get("min_temp")
             hi = attrs.get("max_temp")
+            if cmd.hvac_mode == HEAT:
+                # CC-34: the configured device max caps the advertised live
+                # ceiling — some integrations advertise a wider max_temp than
+                # the device's set_temperature accepts.
+                override = self.room.heater_max_setpoint
+                if override is not None:
+                    hi = override if hi is None else min(hi, override)
             if cmd.hvac_mode == HEAT and hi is not None:
                 base = int(hi)  # CC-33: re-derive ceiling from live range
             elif cmd.hvac_mode == COOL and lo is not None:
@@ -643,6 +654,7 @@ class RoomController:
             heater_fan_only_override=self._switch_state(
                 KEY_HEATER_FAN_ONLY, default=False
             ),
+            heater_max_setpoint=room.heater_max_setpoint,
             target_cooling=target_cooling,
             cooling_medium=target_cooling + cool_med,
             cooling_high=target_cooling + cool_high,

@@ -31,6 +31,7 @@ from .const import (
     CONF_HEATER_CLIMATE,
     CONF_HEATER_FAN_ENTITY,
     CONF_HEATER_FAN_ONLY,
+    CONF_HEATER_MAX_SETPOINT,
     CONF_HEATER_POWER_SWITCH,
     CONF_HUMIDITY_SENSOR,
     CONF_LABEL,
@@ -415,6 +416,13 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                 (vol.Optional(CONF_HEATER_FAN_ENTITY), _FAN),
                 (vol.Optional(CONF_HEATER_POWER_SWITCH), _SWITCH),
                 (vol.Required(CONF_HEATER_FAN_ONLY, default=False), _BOOL),
+            ]
+        if self._data.get(CONF_HAS_HEATER):
+            # CC-34: gated on has_heater only, deliberately not "and not
+            # combined" — a combined room heats through the AC entity and
+            # hides the heater block above, but still needs this cap.
+            fields += [
+                (vol.Optional(CONF_HEATER_MAX_SETPOINT), _temp_number()),
             ]
         if self._data.get(CONF_HAS_FAN):
             fields += [
