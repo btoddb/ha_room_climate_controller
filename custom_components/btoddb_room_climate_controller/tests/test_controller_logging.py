@@ -56,6 +56,7 @@ from rc_controller.engine import (  # noqa: E402
     SwitchTurnOff,
     SwitchTurnOn,
     TurnOffClimate,
+    compute_commands,
 )
 
 
@@ -89,9 +90,21 @@ def _room(**overrides):
         },
         "command_delay": 1.0,
         "power_on_delay": 2.0,
+        "heater_max_setpoint": None,
     }
     defaults.update(overrides)
     return models.Room(**defaults)
+
+
+def test_room_from_subentry_parses_heater_max_setpoint():
+    """CC-34: present/absent/empty all parse correctly (NumberSelector -> float)."""
+    base = {"room_key": "office"}
+    present = models.Room.from_subentry("sub1", {**base, "heater_max_setpoint": 86.0})
+    absent = models.Room.from_subentry("sub1", base)
+    empty = models.Room.from_subentry("sub1", {**base, "heater_max_setpoint": ""})
+    assert present.heater_max_setpoint == 86
+    assert absent.heater_max_setpoint is None
+    assert empty.heater_max_setpoint is None
 
 
 def test_describe_command_maps_each_command_to_a_phrase():
@@ -534,3 +547,110 @@ def test_resolve_command_cool_rederives_from_live_min_when_snapshot_min_is_highe
     resolved = ctrl._resolve_command(SetTemperature(entity_id, 70, "cool"))
 
     assert resolved.temperature == 61
+
+
+# -- CC-34 heater max setpoint override --------------------------------------
+def test_resolve_command_heat_override_caps_live_ceiling():
+    """
+    CC-34: the production scenario — smart_envi advertises a wider max_temp.
+
+    Live range is min 50 / max 95, but the room's heater_max_setpoint override
+    (86, the device's true max) caps the ceiling before CC-33's 1 °F-inward
+    clamp, so the resolved value is 85 — not the 94 the raw live max_temp
+    would produce (and which the real device rejects).
+    """
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 50, "max_temp": 95})})
+    room = _room(has_heater=True, heater_max_setpoint=86)
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+
+    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
+
+    assert resolved.temperature == 85
+
+
+def test_resolve_command_heat_override_above_live_ceiling_is_inert():
+    """CC-34: an override above the live ceiling changes nothing."""
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 50, "max_temp": 86})})
+    room = _room(has_heater=True, heater_max_setpoint=90)
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+
+    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
+
+    assert resolved.temperature == 85
+
+
+def test_resolve_command_heat_override_serves_as_ceiling_when_live_max_missing():
+    """CC-34: with no live max_temp, the override replaces the 85 °F fallback."""
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 50})})
+    room = _room(has_heater=True, heater_max_setpoint=86)
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+
+    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
+
+    assert resolved.temperature == 85
+
+
+def test_resolve_command_cool_ignores_heater_max_override():
+    """CC-34: the override is heat-only — cooling's floor behavior is untouched."""
+    entity_id = "climate.office_ac"
+    hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 60})})
+    room = _room(heater_max_setpoint=86)
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+
+    resolved = ctrl._resolve_command(SetTemperature(entity_id, 70, "cool"))
+
+    assert resolved.temperature == 61
+
+
+def test_run_skips_set_temperature_heat_when_override_caps_ceiling_no_resend():
+    """
+    CC-34 end-to-end: override-capped gate and send-time resolution agree.
+
+    Live max_temp is 95 (advertising more than the device accepts), but the
+    room's heater_max_setpoint override caps the ceiling at 86, so both the
+    engine's gate (desired 85, per CC-33's 1 °F margin) and the controller's
+    live re-derivation land on 85 — matching memory, so no send happens.
+
+    The ``heater`` ClimateInfo carries ``last_commanded_setpoint=85`` (not
+    just ``ctrl._last_commanded_setpoints``, which only feeds the
+    controller's separate resolved-vs-memory skip) so the *engine's own*
+    gate sees memory too. This pins the engine-level cap (``EngineInputs
+    .heater_max`` feeding the CC-32/CC-19 gate clamp): the direct
+    ``compute_commands`` assertion below fails if that cap is removed — the
+    raw gate-desired value would then be 94, mismatch memory 85, and the
+    engine would emit ``SetTemperature`` regardless of what the controller's
+    (separately-tested) send-time re-derivation later does with it.
+    """
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60, "max_temp": 95})})
+    room = _room(has_heater=True, heater_max_setpoint=86)
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+    ctrl._last_commanded_setpoints[entity_id] = 85
+    ctrl._build_inputs = lambda: _inputs(
+        heater=_ac_climate(
+            entity_id=entity_id,
+            hvac_mode="heat",
+            hvac_modes=("off", "heat"),
+            min_temp=60.0,
+            max_temp=95.0,
+            last_commanded_setpoint=85,
+        ),
+        use_heater=True,
+        room_temp=60.0,
+        target_heating=68.0,
+        heater_max_setpoint=86,
+        command_delay_ms=0,
+        power_on_delay_ms=0,
+    )
+
+    # Engine-level: the gate itself must already agree with memory.
+    assert not any(
+        isinstance(c, SetTemperature) for c in compute_commands(ctrl._build_inputs())
+    )
+
+    asyncio.run(ctrl._run("test"))
+
+    assert hass.services.calls == []

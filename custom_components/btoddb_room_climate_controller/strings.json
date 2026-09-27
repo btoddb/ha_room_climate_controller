@@ -59,9 +59,11 @@
             "heater_fan_entity": "Heater companion fan",
             "heater_power_switch": "Heater power switch",
             "heater_fan_only_override": "Allow heater fan-only circulation",
+            "heater_max_setpoint": "Heater max settable temperature (°F, optional)",
             "fan_entities": "Fans"
           },
           "data_description": {
+            "heater_max_setpoint": "Set only if the heater rejects setpoints its integration claims to allow: the device's true maximum. Caps the value commanded while heating (1 °F is kept in reserve, so 86 sends 85).",
             "fan_entities": "Standalone fans in this room (each gets its own target temperature; they share the room's fan-speed offsets)."
           }
         },

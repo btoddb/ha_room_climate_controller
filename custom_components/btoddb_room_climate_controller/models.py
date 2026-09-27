@@ -30,6 +30,7 @@ from .const import (
     CONF_HEATER_CLIMATE,
     CONF_HEATER_FAN_ENTITY,
     CONF_HEATER_FAN_ONLY,
+    CONF_HEATER_MAX_SETPOINT,
     CONF_HEATER_POWER_SWITCH,
     CONF_HUMIDITY_SENSOR,
     CONF_LABEL,
@@ -193,6 +194,7 @@ class Room:
     limits: dict[str, dict[str, float]]
     command_delay: float
     power_on_delay: float
+    heater_max_setpoint: int | None
 
     @classmethod
     def from_subentry(cls, subentry_id: str, data: Mapping[str, Any]) -> Room:
@@ -237,6 +239,13 @@ class Room:
             limits=limits,
             command_delay=float(data.get(CONF_COMMAND_DELAY, DEFAULT_COMMAND_DELAY)),
             power_on_delay=float(data.get(CONF_POWER_ON_DELAY, DEFAULT_POWER_ON_DELAY)),
+            # CC-34: NumberSelector yields a float; truthiness handles
+            # absent/None/"" (cleared on reconfigure) as "no override".
+            heater_max_setpoint=(
+                int(data[CONF_HEATER_MAX_SETPOINT])
+                if data.get(CONF_HEATER_MAX_SETPOINT)
+                else None
+            ),
         )
 
     def supports(self, device: str) -> bool:
@@ -255,7 +264,7 @@ class Room:
         return tuple(d for d in DEVICE_TYPES if self.supports(d))
 
 
-def describe_room_settings(room: Room) -> str:
+def describe_room_settings(room: Room) -> str:  # noqa: PLR0912
     """
     Render a room's full configuration as one log-friendly string (CC-L5).
 
@@ -280,6 +289,8 @@ def describe_room_settings(room: Room) -> str:
         if room.heater_power_switch:
             parts.append(f"heater_power_switch={room.heater_power_switch}")
         parts.append(f"heater_fan_only={room.heater_fan_only}")
+        if room.heater_max_setpoint is not None:
+            parts.append(f"heater_max_setpoint={room.heater_max_setpoint}°F")
     if room.has_fan:
         parts.append(f"fan_entities={list(room.fan_entities)}")
     parts.append(f"temperature_sensor={room.temperature_sensor}")
