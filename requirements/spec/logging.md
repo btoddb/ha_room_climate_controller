@@ -136,7 +136,7 @@ log is emitted for those transitions.
   One line per evaluation (not one per command), e.g.
   `[room=office] RCC commanded: A/C → cool, A/C fan speed → high (trigger: temperature 72→73°F; temp 78°F; cooling target 72°F (med 75°F high 78°F))`.
   Each command is rendered as a short device + action phrase (`A/C → cool`,
-  `A/C setpoint → 65°F`, `Fan speed → high`, `Fan direction → reverse`,
+  `A/C setpoint → 70°F`, `Fan speed → high`, `Fan direction → reverse`,
   `A/C power on`, etc.) so a customer's log shows *why* a device changed without
   needing engine internals.
 

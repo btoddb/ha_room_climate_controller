@@ -100,11 +100,6 @@ DEFAULT_GRAPH_TIME_RANGE: Final = "24"
 CONF_AC_FAN_ONLY: Final = "ac_fan_only_override"
 CONF_HEATER_FAN_ONLY: Final = "heater_fan_only_override"
 
-# CC-34: optional per-room cap on the heating ceiling — the device's true max
-# settable °F, for devices whose integration advertises a wider max_temp than
-# the device accepts (e.g. smart_envi advertising HA's default 95).
-CONF_HEATER_MAX_SETPOINT: Final = "heater_max_setpoint"
-
 # Per-device preset limits {min,max}
 CONF_LIMITS: Final = "limits"
 
@@ -127,6 +122,16 @@ OFFSET_MIN: Final = 1
 OFFSET_MAX: Final = 20
 DEFAULT_MEDIUM_OFFSET: Final = 3
 DEFAULT_HIGH_OFFSET: Final = 6
+
+# CC-35: optional per-room device setpoint offsets. While conditioning, the
+# device's own setpoint tracks the room target by this many °F (heater: +,
+# A/C: -), keeping the device's internal thermostat from stopping early.
+# Named distinctly from OFFSET_MIN/MAX (the fan-speed-tier offsets above).
+CONF_HEATER_SETPOINT_OFFSET: Final = "heater_setpoint_offset"
+CONF_AC_SETPOINT_OFFSET: Final = "ac_setpoint_offset"
+DEFAULT_SETPOINT_OFFSET: Final = 2
+SETPOINT_OFFSET_MIN: Final = 0
+SETPOINT_OFFSET_MAX: Final = 20
 
 TEMP_UNIT: Final = "°F"
 

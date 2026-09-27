@@ -56,7 +56,6 @@ from rc_controller.engine import (  # noqa: E402
     SwitchTurnOff,
     SwitchTurnOn,
     TurnOffClimate,
-    compute_commands,
 )
 
 
@@ -90,21 +89,46 @@ def _room(**overrides):
         },
         "command_delay": 1.0,
         "power_on_delay": 2.0,
-        "heater_max_setpoint": None,
+        "heater_setpoint_offset": 2,
+        "ac_setpoint_offset": 2,
     }
     defaults.update(overrides)
     return models.Room(**defaults)
 
 
-def test_room_from_subentry_parses_heater_max_setpoint():
-    """CC-34: present/absent/empty all parse correctly (NumberSelector -> float)."""
+def test_room_from_subentry_parses_setpoint_offsets():
+    """
+    CC-35: present/absent/empty/explicit-0 all parse correctly.
+
+    NumberSelector yields a float; ``from_subentry`` must use an
+    is-None/empty check, not truthiness, so an explicit 0 °F offset (a legal,
+    distinct configuration) survives.
+    """
     base = {"room_key": "office"}
-    present = models.Room.from_subentry("sub1", {**base, "heater_max_setpoint": 86.0})
+    present = models.Room.from_subentry(
+        "sub1", {**base, "heater_setpoint_offset": 5.0, "ac_setpoint_offset": 3.0}
+    )
     absent = models.Room.from_subentry("sub1", base)
-    empty = models.Room.from_subentry("sub1", {**base, "heater_max_setpoint": ""})
-    assert present.heater_max_setpoint == 86
-    assert absent.heater_max_setpoint is None
-    assert empty.heater_max_setpoint is None
+    empty = models.Room.from_subentry(
+        "sub1", {**base, "heater_setpoint_offset": "", "ac_setpoint_offset": ""}
+    )
+    zero = models.Room.from_subentry(
+        "sub1", {**base, "heater_setpoint_offset": 0, "ac_setpoint_offset": 0}
+    )
+    # A leftover key from the removed CC-34 heater-max override, as stored by
+    # a pre-#75/#76 subentry, is ignored by design — no migration.
+    ignored = models.Room.from_subentry("sub1", {**base, "heater_max_setpoint": 86})
+
+    assert present.heater_setpoint_offset == 5
+    assert present.ac_setpoint_offset == 3
+    assert absent.heater_setpoint_offset == 2
+    assert absent.ac_setpoint_offset == 2
+    assert empty.heater_setpoint_offset == 2
+    assert empty.ac_setpoint_offset == 2
+    assert zero.heater_setpoint_offset == 0
+    assert zero.ac_setpoint_offset == 0
+    assert ignored.heater_setpoint_offset == 2
+    assert ignored.ac_setpoint_offset == 2
 
 
 def test_describe_command_maps_each_command_to_a_phrase():
@@ -241,7 +265,7 @@ class _StubHass:
 
 def test_climate_info_threads_last_commanded_setpoint():
     """
-    CC-19: ``_climate_info`` populates ``last_commanded_setpoint`` from memory.
+    CC-19: ``_climate_info`` populates ``last_commanded_setpoint``/mode from memory.
 
     Uses lightweight stubs rather than a full HA harness — ``_climate_info``
     only reads ``hass.states.get(entity_id).attributes`` and the controller's
@@ -263,11 +287,12 @@ def test_climate_info_threads_last_commanded_setpoint():
     )
     room = _room()
     ctrl = controller.RoomController(hass, entry=None, room=room)
-    ctrl._last_commanded_setpoints["climate.office_ac"] = 65
+    ctrl._last_commanded_setpoints["climate.office_ac"] = ("cool", 65)
 
     info = ctrl._climate_info("climate.office_ac")
 
     assert info.last_commanded_setpoint == 65
+    assert info.last_commanded_hvac_mode == "cool"
     assert info.current_setpoint == 65.3
 
 
@@ -292,6 +317,7 @@ def test_climate_info_last_commanded_setpoint_defaults_to_none():
     info = ctrl._climate_info("climate.office_ac")
 
     assert info.last_commanded_setpoint is None
+    assert info.last_commanded_hvac_mode is None
 
 
 # -- CC-19 last-commanded-setpoint memory (controller._run) -----------------
@@ -308,6 +334,7 @@ def _ac_climate(**overrides):
         supports_set_temp=True,
         current_setpoint=None,
         last_commanded_setpoint=None,
+        last_commanded_hvac_mode=None,
     )
     defaults.update(overrides)
     return ClimateInfo(**defaults)
@@ -315,24 +342,24 @@ def _ac_climate(**overrides):
 
 def test_run_records_resolved_setpoint_not_raw_command_value():
     """
-    CC-19: the controller remembers the live-resolved value it actually sent.
+    CC-19/CC-35: the controller remembers the live-resolved value it actually sent.
 
-    Not the engine's raw pre-clamp command value — CC-9's send-time clamp
-    applies first. ``_run`` is a plain coroutine, driven directly with
-    ``asyncio.run`` here rather than a full HA test harness;
-    ``ctrl._build_inputs`` is monkeypatched to hand back a canned
-    ``EngineInputs`` so the real engine (``compute_commands``) still drives
-    what gets sent.
+    Not the engine's raw pre-clamp command value — the controller's
+    clamp-only send-time resolution applies first. ``_run`` is a plain
+    coroutine, driven directly with ``asyncio.run`` here rather than a full HA
+    test harness; ``ctrl._build_inputs`` is monkeypatched to hand back a
+    canned ``EngineInputs`` so the real engine (``compute_commands``) still
+    drives what gets sent.
 
-    The engine's raw ``ac_setpoint_int`` here is 61 (from the build-time
-    ``min_temp=61.0`` snapshot), but the device's *live* reported range
-    (``min_temp=62``) clamps it up to 63 at send time (CC-9) — that's the
-    value that must land in memory, or the next evaluation's
+    The engine's raw ``ac_setpoint_int`` here is 70 (target_cooling 72 minus
+    the default 2 °F offset), but the device's *live* reported range
+    (``min_temp=72``) clamps it up to 73 at send time (CC-9's 1 °F margin) —
+    that's the value that must land in memory, or the next evaluation's
     memory-vs-desired compare would be comparing against a value never
     actually sent to the device.
     """
     entity_id = "climate.office_ac"
-    hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 62, "max_temp": 86})})
+    hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 72, "max_temp": 86})})
     room = _room()
     ctrl = controller.RoomController(hass, entry=None, room=room)
     ctrl._build_inputs = lambda: _inputs(
@@ -345,10 +372,10 @@ def test_run_records_resolved_setpoint_not_raw_command_value():
         (
             "climate",
             "set_temperature",
-            {"entity_id": entity_id, "temperature": 63, "hvac_mode": "cool"},
+            {"entity_id": entity_id, "temperature": 73, "hvac_mode": "cool"},
         ),
     ]
-    assert ctrl._last_commanded_setpoints[entity_id] == 63
+    assert ctrl._last_commanded_setpoints[entity_id] == ("cool", 73)
 
 
 def test_run_records_nothing_on_service_call_failure():
@@ -381,13 +408,50 @@ def test_build_inputs_clears_memory_when_manual_mode_active():
     hass = _StubHass({})
     room = _room()
     ctrl = controller.RoomController(hass, entry=None, room=room)
-    ctrl._last_commanded_setpoints["climate.office_ac"] = 65
+    ctrl._last_commanded_setpoints["climate.office_ac"] = ("cool", 65)
     ctrl._switch_state = lambda key, default=False: True  # noqa: ARG005 (manual mode)
 
     result = ctrl._build_inputs()
 
     assert result is None
     assert ctrl._last_commanded_setpoints == {}
+
+
+def test_run_sends_and_rerecords_when_memory_mode_differs_from_resolved_mode():
+    """
+    CC-19 (mode-aware memory): a resolved-mode mismatch is never treated as a skip.
+
+    Memory holds (heat, 70) from a prior Heat cycle on a combined heat pump;
+    this evaluation resolves to (cool, 70) — the same numeric value, since
+    the default heating (68 + 2) and cooling (72 - 2) targets coincide. The
+    controller's resolved-vs-memory skip requires **both** the mode and the
+    temperature to match, so the mismatched mode means it is not skipped:
+    the setpoint is sent, and memory is updated to (cool, 70) on success.
+    """
+    entity_id = "climate.office_ac"
+    hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 60, "max_temp": 86})})
+    room = _room()
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+    ctrl._last_commanded_setpoints[entity_id] = ("heat", 70)
+    ctrl._build_inputs = lambda: _inputs(
+        ac=_ac_climate(hvac_mode="cool", current_setpoint=None),
+        fans=(),
+        room_temp=80.0,
+        target_cooling=72.0,
+        command_delay_ms=0,
+        power_on_delay_ms=0,
+    )
+
+    asyncio.run(ctrl._run("test"))
+
+    assert hass.services.calls == [
+        (
+            "climate",
+            "set_temperature",
+            {"entity_id": entity_id, "temperature": 70, "hvac_mode": "cool"},
+        ),
+    ]
+    assert ctrl._last_commanded_setpoints[entity_id] == ("cool", 70)
 
 
 def test_run_skips_set_temperature_when_resolved_value_matches_memory():
@@ -397,18 +461,20 @@ def test_run_skips_set_temperature_when_resolved_value_matches_memory():
     Models a Fan Only -> Cool transition on a heat pump: the engine's
     *build-time* ``ClimateInfo`` snapshot still reports a degenerate range
     (``min_temp=0``/``max_temp=2``, as this device does mid-transition), so
-    the engine computes a garbage desired setpoint and decides to send. But
-    the device's *live* range (read by the controller at resolve time) is
-    the real cool-mode range, and resolving the engine's raw command against
-    it lands back on 63 — exactly what memory already has from the last cool
-    cycle. The controller drops that send, while a second command in the
-    same batch (``SetFanMode``) still goes out untouched.
+    the engine's gate clamps its raw desired setpoint (70, target_cooling 72
+    minus the default 2 °F offset) down into that degenerate range and
+    (mis)fires a send. But the device's *live* range (read by the controller
+    at resolve time) is the real cool-mode range, and the controller's
+    clamp-only resolution of the engine's *raw* command (70) against it lands
+    back on 70 — exactly what memory already has from the last cool cycle.
+    The controller drops that send, while a second command in the same batch
+    (``SetFanMode``) still goes out untouched.
     """
     entity_id = "climate.office_ac"
     hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 62, "max_temp": 86})})
     room = _room()
     ctrl = controller.RoomController(hass, entry=None, room=room)
-    ctrl._last_commanded_setpoints[entity_id] = 63
+    ctrl._last_commanded_setpoints[entity_id] = ("cool", 70)
     ctrl._build_inputs = lambda: _inputs(
         ac=_ac_climate(
             min_temp=0.0,
@@ -417,8 +483,8 @@ def test_run_skips_set_temperature_when_resolved_value_matches_memory():
             current_setpoint=70.0,
         ),
         fans=(),
-        room_temp=70.0,
-        target_cooling=65.0,
+        room_temp=80.0,
+        target_cooling=72.0,
         cooling_medium=90.0,
         cooling_high=95.0,
         command_delay_ms=0,
@@ -430,26 +496,28 @@ def test_run_skips_set_temperature_when_resolved_value_matches_memory():
     assert hass.services.calls == [
         ("climate", "set_fan_mode", {"entity_id": entity_id, "fan_mode": "low"}),
     ]
-    assert ctrl._last_commanded_setpoints[entity_id] == 63
+    assert ctrl._last_commanded_setpoints[entity_id] == ("cool", 70)
 
 
 def test_run_skips_set_temperature_heat_when_resolved_value_matches_memory():
     """
     Heat twin of ``test_run_skips_set_temperature_when_resolved_value_matches_memory``.
 
-    Models a split heater (CC-33) already reporting ``heat`` whose
-    *build-time* ``ClimateInfo`` snapshot still holds a degenerate range
+    Models a split heater already reporting ``heat`` whose *build-time*
+    ``ClimateInfo`` snapshot still holds a degenerate range
     (``min_temp=0``/``max_temp=2``, as can linger mid mode-transition), so the
-    engine's raw ceiling is 2. ``_resolve_command`` must re-derive the ceiling
-    from the device's *live* heat-mode range (60..86) read at resolve time
-    rather than merely clamping the raw value downward — re-deriving lands on
-    85, exactly what memory already has, so the controller drops the send.
+    engine's gate clamps its raw desired setpoint (70, target_heating 68 plus
+    the default 2 °F offset) down into that degenerate range and (mis)fires a
+    send. The controller's clamp-only resolution of the engine's *raw*
+    command (70) against the device's *live* heat-mode range (60..86) lands
+    back on 70, exactly what memory already has, so the controller drops the
+    send.
     """
     entity_id = "climate.heater"
     hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60, "max_temp": 86})})
     room = _room()
     ctrl = controller.RoomController(hass, entry=None, room=room)
-    ctrl._last_commanded_setpoints[entity_id] = 85
+    ctrl._last_commanded_setpoints[entity_id] = ("heat", 70)
     ctrl._build_inputs = lambda: _inputs(
         heater=_ac_climate(
             entity_id=entity_id,
@@ -470,23 +538,29 @@ def test_run_skips_set_temperature_heat_when_resolved_value_matches_memory():
     assert hass.services.calls == []
 
 
-def test_run_sends_live_ceiling_heat_when_no_memory():
+def test_run_degenerate_fan_only_snapshot_heat_transition_no_loop_with_memory():
     """
-    Heat twin of the above, without memory: must send the *live* ceiling (85).
+    CC-19/CC-35 end-to-end: a degenerate fan_only->heat snapshot doesn't loop.
 
-    Without the CC-33 re-derivation fix, ``_resolve_command`` would only
-    clamp the raw build-time value (2) downward into the live range, sending
-    61 °F instead of 85 °F and defeating the feature.
+    Mid a mode transition, the build-time ``ClimateInfo`` snapshot still
+    reports fan_only's degenerate range (``min_temp=0``/``max_temp=2``), so
+    the engine's gate mis-clamps its desired setpoint against that stale
+    range and fires a send regardless. But the controller's live-resolved
+    value (clamp-only, against the device's real heat-mode range 50..86)
+    lands on 70 — the raw target+offset value — which already matches
+    memory, so the resolved ``SetTemperature`` is dropped while the mode
+    switch itself still goes out.
     """
     entity_id = "climate.heater"
-    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60, "max_temp": 86})})
+    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 50, "max_temp": 86})})
     room = _room()
     ctrl = controller.RoomController(hass, entry=None, room=room)
+    ctrl._last_commanded_setpoints[entity_id] = ("heat", 70)
     ctrl._build_inputs = lambda: _inputs(
         heater=_ac_climate(
             entity_id=entity_id,
-            hvac_mode="heat",
-            hvac_modes=("off", "heat"),
+            hvac_mode="fan_only",
+            hvac_modes=("off", "heat", "fan_only"),
             min_temp=0.0,
             max_temp=2.0,
         ),
@@ -500,157 +574,83 @@ def test_run_sends_live_ceiling_heat_when_no_memory():
     asyncio.run(ctrl._run("test"))
 
     assert hass.services.calls == [
-        (
-            "climate",
-            "set_temperature",
-            {"entity_id": entity_id, "temperature": 85, "hvac_mode": "heat"},
-        ),
+        ("climate", "set_hvac_mode", {"entity_id": entity_id, "hvac_mode": "heat"}),
     ]
-    assert ctrl._last_commanded_setpoints[entity_id] == 85
+    assert ctrl._last_commanded_setpoints[entity_id] == ("heat", 70)
 
 
-# -- CC-9/CC-33 ``_resolve_command`` edge cases ------------------------------
-def test_resolve_command_heat_falls_back_to_raw_when_live_max_temp_missing():
+def test_run_degenerate_fan_only_snapshot_heat_transition_sends_once_without_memory():
     """
-    CC-33: falls back to the raw commanded value when there's no live ceiling.
+    Variant of the above without memory.
 
-    With no live ``max_temp`` to re-derive the ceiling from,
-    ``_resolve_command`` falls back to the raw commanded value — still
-    clamped against the live ``min_temp`` when the device reports one.
+    Sends the resolved value once and records it, rather than looping.
     """
-    entity_id = "climate.heater"
-    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60})})
-    room = _room()
-    ctrl = controller.RoomController(hass, entry=None, room=room)
-
-    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
-
-    assert resolved.temperature == 61
-
-
-def test_resolve_command_cool_rederives_from_live_min_when_snapshot_min_is_higher():
-    """
-    CC-9: re-derives the floor from live ``min_temp``, not a stale snapshot.
-
-    A stale build-time snapshot with a higher ``min_temp`` than the device's
-    live range (e.g. mid mode-transition) must not pin the resolved setpoint
-    to that stale value. ``_resolve_command`` re-derives the floor from the
-    *live* ``min_temp`` (``round(lo)``) instead of merely clamping the raw
-    command, which here (70, already above ``lo + 1``) would pass through a
-    naive clamp untouched.
-    """
-    entity_id = "climate.office_ac"
-    hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 60})})
-    room = _room()
-    ctrl = controller.RoomController(hass, entry=None, room=room)
-
-    resolved = ctrl._resolve_command(SetTemperature(entity_id, 70, "cool"))
-
-    assert resolved.temperature == 61
-
-
-# -- CC-34 heater max setpoint override --------------------------------------
-def test_resolve_command_heat_override_caps_live_ceiling():
-    """
-    CC-34: the production scenario — smart_envi advertises a wider max_temp.
-
-    Live range is min 50 / max 95, but the room's heater_max_setpoint override
-    (86, the device's true max) caps the ceiling before CC-33's 1 °F-inward
-    clamp, so the resolved value is 85 — not the 94 the raw live max_temp
-    would produce (and which the real device rejects).
-    """
-    entity_id = "climate.heater"
-    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 50, "max_temp": 95})})
-    room = _room(has_heater=True, heater_max_setpoint=86)
-    ctrl = controller.RoomController(hass, entry=None, room=room)
-
-    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
-
-    assert resolved.temperature == 85
-
-
-def test_resolve_command_heat_override_above_live_ceiling_is_inert():
-    """CC-34: an override above the live ceiling changes nothing."""
     entity_id = "climate.heater"
     hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 50, "max_temp": 86})})
-    room = _room(has_heater=True, heater_max_setpoint=90)
+    room = _room()
     ctrl = controller.RoomController(hass, entry=None, room=room)
-
-    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
-
-    assert resolved.temperature == 85
-
-
-def test_resolve_command_heat_override_serves_as_ceiling_when_live_max_missing():
-    """CC-34: with no live max_temp, the override replaces the 85 °F fallback."""
-    entity_id = "climate.heater"
-    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 50})})
-    room = _room(has_heater=True, heater_max_setpoint=86)
-    ctrl = controller.RoomController(hass, entry=None, room=room)
-
-    resolved = ctrl._resolve_command(SetTemperature(entity_id, 2, "heat"))
-
-    assert resolved.temperature == 85
-
-
-def test_resolve_command_cool_ignores_heater_max_override():
-    """CC-34: the override is heat-only — cooling's floor behavior is untouched."""
-    entity_id = "climate.office_ac"
-    hass = _StubHass({entity_id: _StubState("cool", {"min_temp": 60})})
-    room = _room(heater_max_setpoint=86)
-    ctrl = controller.RoomController(hass, entry=None, room=room)
-
-    resolved = ctrl._resolve_command(SetTemperature(entity_id, 70, "cool"))
-
-    assert resolved.temperature == 61
-
-
-def test_run_skips_set_temperature_heat_when_override_caps_ceiling_no_resend():
-    """
-    CC-34 end-to-end: override-capped gate and send-time resolution agree.
-
-    Live max_temp is 95 (advertising more than the device accepts), but the
-    room's heater_max_setpoint override caps the ceiling at 86, so both the
-    engine's gate (desired 85, per CC-33's 1 °F margin) and the controller's
-    live re-derivation land on 85 — matching memory, so no send happens.
-
-    The ``heater`` ClimateInfo carries ``last_commanded_setpoint=85`` (not
-    just ``ctrl._last_commanded_setpoints``, which only feeds the
-    controller's separate resolved-vs-memory skip) so the *engine's own*
-    gate sees memory too. This pins the engine-level cap (``EngineInputs
-    .heater_max`` feeding the CC-32/CC-19 gate clamp): the direct
-    ``compute_commands`` assertion below fails if that cap is removed — the
-    raw gate-desired value would then be 94, mismatch memory 85, and the
-    engine would emit ``SetTemperature`` regardless of what the controller's
-    (separately-tested) send-time re-derivation later does with it.
-    """
-    entity_id = "climate.heater"
-    hass = _StubHass({entity_id: _StubState("heat", {"min_temp": 60, "max_temp": 95})})
-    room = _room(has_heater=True, heater_max_setpoint=86)
-    ctrl = controller.RoomController(hass, entry=None, room=room)
-    ctrl._last_commanded_setpoints[entity_id] = 85
     ctrl._build_inputs = lambda: _inputs(
         heater=_ac_climate(
             entity_id=entity_id,
-            hvac_mode="heat",
-            hvac_modes=("off", "heat"),
-            min_temp=60.0,
-            max_temp=95.0,
-            last_commanded_setpoint=85,
+            hvac_mode="fan_only",
+            hvac_modes=("off", "heat", "fan_only"),
+            min_temp=0.0,
+            max_temp=2.0,
         ),
         use_heater=True,
         room_temp=60.0,
         target_heating=68.0,
-        heater_max_setpoint=86,
         command_delay_ms=0,
         power_on_delay_ms=0,
     )
 
-    # Engine-level: the gate itself must already agree with memory.
-    assert not any(
-        isinstance(c, SetTemperature) for c in compute_commands(ctrl._build_inputs())
-    )
-
     asyncio.run(ctrl._run("test"))
 
-    assert hass.services.calls == []
+    assert hass.services.calls == [
+        ("climate", "set_hvac_mode", {"entity_id": entity_id, "hvac_mode": "heat"}),
+        (
+            "climate",
+            "set_temperature",
+            {"entity_id": entity_id, "temperature": 70, "hvac_mode": "heat"},
+        ),
+    ]
+    assert ctrl._last_commanded_setpoints[entity_id] == ("heat", 70)
+
+
+# -- CC-35 ``_resolve_command`` edge cases (clamp-only) ----------------------
+def test_resolve_command_clamp_only_passes_through_without_live_range():
+    """
+    CC-35: ``_resolve_command`` is now clamp-only.
+
+    With no live min/max reported, the raw command passes through untouched
+    (no HEAT/COOL extreme re-derivation any more).
+    """
+    entity_id = "climate.heater"
+    hass = _StubHass({entity_id: _StubState("heat", {})})
+    room = _room()
+    ctrl = controller.RoomController(hass, entry=None, room=room)
+
+    resolved = ctrl._resolve_command(SetTemperature(entity_id, 70, "heat"))
+
+    assert resolved.temperature == 70
+
+
+def test_resolve_command_clamp_only_clamps_against_live_range():
+    """
+    CC-35/CC-9: the raw command is clamped against the device's live range.
+
+    1 °F inward, nothing more. A live min_temp of 72 clamps a raw 70 up to
+    73; a raw value already inside a live 60..86 range (70) is left
+    untouched.
+    """
+    heater_id = "climate.heater"
+    heater_hass = _StubHass({heater_id: _StubState("heat", {"min_temp": 72})})
+    heater_ctrl = controller.RoomController(heater_hass, entry=None, room=_room())
+    resolved = heater_ctrl._resolve_command(SetTemperature(heater_id, 70, "heat"))
+    assert resolved.temperature == 73
+
+    ac_id = "climate.office_ac"
+    ac_hass = _StubHass({ac_id: _StubState("cool", {"min_temp": 60, "max_temp": 86})})
+    ac_ctrl = controller.RoomController(ac_hass, entry=None, room=_room())
+    resolved_ac = ac_ctrl._resolve_command(SetTemperature(ac_id, 70, "cool"))
+    assert resolved_ac.temperature == 70

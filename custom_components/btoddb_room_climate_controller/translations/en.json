@@ -55,15 +55,17 @@
             "ac_fan_entity": "A/C companion fan (for speed control)",
             "ac_power_switch": "A/C power switch (optional pre-power gate)",
             "ac_fan_only_override": "Allow A/C fan-only circulation",
+            "ac_setpoint_offset": "A/C setpoint offset (°F, optional, default 2)",
             "heater_climate": "Heater climate entity",
             "heater_fan_entity": "Heater companion fan",
             "heater_power_switch": "Heater power switch",
             "heater_fan_only_override": "Allow heater fan-only circulation",
-            "heater_max_setpoint": "Heater max settable temperature (°F, optional)",
+            "heater_setpoint_offset": "Heater setpoint offset (°F, optional, default 2)",
             "fan_entities": "Fans"
           },
           "data_description": {
-            "heater_max_setpoint": "Set only if the heater rejects setpoints its integration claims to allow: the device's true maximum. Caps the value commanded while heating (1 °F is kept in reserve, so 86 sends 85).",
+            "ac_setpoint_offset": "While cooling, the device's own setpoint is the room target minus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
+            "heater_setpoint_offset": "While heating, the device's own setpoint is the room target plus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
             "fan_entities": "Standalone fans in this room (each gets its own target temperature; they share the room's fan-speed offsets)."
           }
         },
