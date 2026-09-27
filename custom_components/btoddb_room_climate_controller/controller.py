@@ -32,8 +32,6 @@ from .const import (
     LOGGER_SENSOR,
 )
 from .engine import (
-    COOL,
-    HEAT,
     ClimateInfo,
     Command,
     Delay,
@@ -247,10 +245,14 @@ class RoomController:
         self._unsub_state = None
         self._tracked: frozenset[str] = frozenset()
         self._task: asyncio.Task | None = None
-        # Whole-°F value RCC last successfully commanded to each climate
-        # entity (CC-19), keyed by entity_id. Cleared while manual mode is
+        # (hvac_mode, whole-°F value) RCC last successfully commanded to each
+        # climate entity (CC-19), keyed by entity_id. Mode-aware so a
+        # decision-mode switch (Heat<->Cool) is never mistaken for a
+        # converged setpoint just because the two modes' desired values
+        # coincide (e.g. both default to 70 °F) — see
+        # ``_setpoint_needs_send`` in engine.py. Cleared while manual mode is
         # active, since the user may change device setpoints by hand.
-        self._last_commanded_setpoints: dict[str, int] = {}
+        self._last_commanded_setpoints: dict[str, tuple[str, int]] = {}
 
     # -- lifecycle -----------------------------------------------------------
     @callback
@@ -440,47 +442,29 @@ class RoomController:
         """
         Resolve a command against the device's *live* state before it is sent.
 
-        Currently this re-derives the extreme (device ceiling for heat, floor
-        for cool) from the device's reported live range and clamps a
-        ``SetTemperature`` into it (CC-9/CC-33). Used by ``_run`` both at send
-        time and when rendering the CC-L7 description, so the logged value
-        always matches what is actually sent. ``_run`` resolves each command in
-        order, after any preceding ``SetHvacMode`` in the same evaluation, so
-        the live range read here reflects what the device will actually
-        validate against.
-
-        Heat/cool commands carry the engine's raw extreme (device ceiling/floor)
-        computed from the *build-time* snapshot, which can be degenerate for a
-        combined heat pump mid mode-transition (e.g. fan_only reporting
-        min/max 0/2). Clamping that raw extreme against the live range only
-        ever pulls it *down* toward the snapshot's stale value, defeating
-        CC-9/CC-33 instead of reaching the live extreme. So the extreme is
-        re-derived from the *live* range by ``hvac_mode`` first — the live
-        ceiling for heat, the live floor for cool — before clamping.
-
-        CC-34: while heating, the configured ``heater_max_setpoint`` override
-        caps the live ceiling before it's used, so this re-derivation and the
-        engine's gate clamp agree.
+        CC-35: clamp-only. The engine already computed the desired setpoint
+        from the room target and the configured offset; this just clamps that
+        raw value into the device's *live* min/max (CC-9's 1 °F margin;
+        ``clamp_setpoint``), read fresh from the entity's current state
+        (rather than clamping against the engine's build-time snapshot) so a
+        mode-dependent range (e.g. an A/C reporting different limits off vs
+        cool) is honored. Used by ``_run`` both at send time and when
+        rendering the CC-L7 description, so the logged value always matches
+        what is actually sent. ``_run`` resolves each command in order, after
+        any preceding ``SetHvacMode`` in the same evaluation, so the live
+        range read here reflects what the device will actually validate
+        against. ``cmd.hvac_mode`` is no longer consulted here (kept on the
+        dataclass only for the CC-L7 description) — a stale build-time
+        snapshot mid mode-transition (e.g. a combined heat pump's fan_only
+        reporting a degenerate min/max 0/2) is not re-derived; instead `_run`'s
+        resolved-vs-memory skip (below) absorbs it without looping.
         """
         if isinstance(cmd, SetTemperature):
             state = self.hass.states.get(cmd.entity_id)
             attrs = state.attributes if state else {}
-            lo = attrs.get("min_temp")
-            hi = attrs.get("max_temp")
-            if cmd.hvac_mode == HEAT:
-                # CC-34: the configured device max caps the advertised live
-                # ceiling — some integrations advertise a wider max_temp than
-                # the device's set_temperature accepts.
-                override = self.room.heater_max_setpoint
-                if override is not None:
-                    hi = override if hi is None else min(hi, override)
-            if cmd.hvac_mode == HEAT and hi is not None:
-                base = int(hi)  # CC-33: re-derive ceiling from live range
-            elif cmd.hvac_mode == COOL and lo is not None:
-                base = round(lo)  # CC-9: re-derive floor from live range
-            else:
-                base = cmd.temperature
-            temperature = clamp_setpoint(base, lo, hi)
+            temperature = clamp_setpoint(
+                cmd.temperature, attrs.get("min_temp"), attrs.get("max_temp")
+            )
             if temperature != cmd.temperature:
                 return replace(cmd, temperature=temperature)
         return cmd
@@ -510,10 +494,10 @@ class RoomController:
                 # than from the build-time snapshot: an A/C reports a
                 # mode-dependent range (off vs cool), and any preceding
                 # SetHvacMode has already switched it, so this reflects the
-                # range the device will actually validate against (CC-9).
-                # Resolved once here and reused for both the service call and
-                # the CC-L7 description, so the log always matches what was
-                # actually sent.
+                # range the device will actually validate against (CC-35's
+                # live clamp). Resolved once here and reused for both the
+                # service call and the CC-L7 description, so the log always
+                # matches what was actually sent.
                 resolved_cmd = self._resolve_command(cmd)
                 # CC-19: a mode-transition snapshot (e.g. fan_only -> cool) can
                 # resolve the engine's desired setpoint against a degenerate
@@ -521,10 +505,11 @@ class RoomController:
                 # back on what memory already has even though the engine's
                 # raw desired value didn't match. Drop it here rather than
                 # re-sending a value the device was already just commanded.
-                if (
-                    isinstance(resolved_cmd, SetTemperature)
-                    and self._last_commanded_setpoints.get(resolved_cmd.entity_id)
-                    == resolved_cmd.temperature
+                if isinstance(
+                    resolved_cmd, SetTemperature
+                ) and self._last_commanded_setpoints.get(resolved_cmd.entity_id) == (
+                    resolved_cmd.hvac_mode,
+                    resolved_cmd.temperature,
                 ):
                     _LOGGER.debug(
                         "Room %s: skipping SetTemperature %s=%s°F "
@@ -554,13 +539,16 @@ class RoomController:
                         data,
                     )
                 else:
-                    # CC-19: remember what was actually sent (the live-clamped
-                    # value) so the next evaluation's memory-vs-desired
-                    # compare is self-consistent in steady state. Only on
-                    # success — a failed call must retry next evaluation.
+                    # CC-19: remember the (mode, live-clamped value) pair that
+                    # was actually sent so the next evaluation's
+                    # memory-vs-desired compare is self-consistent in steady
+                    # state, and a mode switch is never mistaken for a match.
+                    # Only on success — a failed call must retry next
+                    # evaluation.
                     if isinstance(resolved_cmd, SetTemperature):
                         self._last_commanded_setpoints[resolved_cmd.entity_id] = (
-                            resolved_cmd.temperature
+                            resolved_cmd.hvac_mode,
+                            resolved_cmd.temperature,
                         )
             if action_descriptions:
                 _LOGGER.info(
@@ -654,7 +642,8 @@ class RoomController:
             heater_fan_only_override=self._switch_state(
                 KEY_HEATER_FAN_ONLY, default=False
             ),
-            heater_max_setpoint=room.heater_max_setpoint,
+            heater_setpoint_offset=room.heater_setpoint_offset,
+            ac_setpoint_offset=room.ac_setpoint_offset,
             target_cooling=target_cooling,
             cooling_medium=target_cooling + cool_med,
             cooling_high=target_cooling + cool_high,
@@ -732,6 +721,7 @@ class RoomController:
         attrs = state.attributes
         features = int(attrs.get("supported_features") or 0)
         raw_setpoint = attrs.get("temperature")
+        memory = self._last_commanded_setpoints.get(entity_id)
         return ClimateInfo(
             entity_id=entity_id,
             hvac_mode=attrs.get("hvac_mode") or state.state,
@@ -742,7 +732,8 @@ class RoomController:
             max_temp=attrs.get("max_temp"),
             supports_set_temp=bool(features & 1),
             current_setpoint=float(raw_setpoint) if raw_setpoint is not None else None,
-            last_commanded_setpoint=self._last_commanded_setpoints.get(entity_id),
+            last_commanded_setpoint=memory[1] if memory else None,
+            last_commanded_hvac_mode=memory[0] if memory else None,
         )
 
     def _fan_info(self, entity_id: str | None) -> FanInfo | None:

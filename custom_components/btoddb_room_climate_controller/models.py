@@ -19,6 +19,7 @@ from .const import (
     CONF_AC_FAN_ENTITY,
     CONF_AC_FAN_ONLY,
     CONF_AC_POWER_SWITCH,
+    CONF_AC_SETPOINT_OFFSET,
     CONF_AREA_ID,
     CONF_COMBINED,
     CONF_COMMAND_DELAY,
@@ -30,8 +31,8 @@ from .const import (
     CONF_HEATER_CLIMATE,
     CONF_HEATER_FAN_ENTITY,
     CONF_HEATER_FAN_ONLY,
-    CONF_HEATER_MAX_SETPOINT,
     CONF_HEATER_POWER_SWITCH,
+    CONF_HEATER_SETPOINT_OFFSET,
     CONF_HUMIDITY_SENSOR,
     CONF_LABEL,
     CONF_LIMITS,
@@ -43,6 +44,7 @@ from .const import (
     DEFAULT_COMMAND_DELAY,
     DEFAULT_LIMITS,
     DEFAULT_POWER_ON_DELAY,
+    DEFAULT_SETPOINT_OFFSET,
     DEVICE_COOLING,
     DEVICE_FAN,
     DEVICE_HEATING,
@@ -152,6 +154,16 @@ def _coerce_window_sensors(data: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(eid for eid in raw if eid)
 
 
+def _parse_offset(raw: Any) -> int:
+    """
+    Parse a CC-35 setpoint-offset config value, defaulting unset/blank to 2.
+
+    NumberSelector yields a float; an explicit-None/empty check (not
+    truthiness) is required here — ``0`` is a legal offset and must survive.
+    """
+    return DEFAULT_SETPOINT_OFFSET if raw is None or raw == "" else int(raw)
+
+
 def _coerce_fan_entities(data: Mapping[str, Any]) -> tuple[str, ...]:
     raw = data.get(CONF_FAN_ENTITIES)
     if raw is None:
@@ -194,7 +206,8 @@ class Room:
     limits: dict[str, dict[str, float]]
     command_delay: float
     power_on_delay: float
-    heater_max_setpoint: int | None
+    heater_setpoint_offset: int
+    ac_setpoint_offset: int
 
     @classmethod
     def from_subentry(cls, subentry_id: str, data: Mapping[str, Any]) -> Room:
@@ -239,13 +252,11 @@ class Room:
             limits=limits,
             command_delay=float(data.get(CONF_COMMAND_DELAY, DEFAULT_COMMAND_DELAY)),
             power_on_delay=float(data.get(CONF_POWER_ON_DELAY, DEFAULT_POWER_ON_DELAY)),
-            # CC-34: NumberSelector yields a float; truthiness handles
-            # absent/None/"" (cleared on reconfigure) as "no override".
-            heater_max_setpoint=(
-                int(data[CONF_HEATER_MAX_SETPOINT])
-                if data.get(CONF_HEATER_MAX_SETPOINT)
-                else None
-            ),
+            # CC-35: a leftover CC-34 heater-max-override key from a
+            # pre-#75/#76 stored subentry is ignored by design — nothing
+            # iterates the raw mapping, so no migration is needed.
+            heater_setpoint_offset=_parse_offset(data.get(CONF_HEATER_SETPOINT_OFFSET)),
+            ac_setpoint_offset=_parse_offset(data.get(CONF_AC_SETPOINT_OFFSET)),
         )
 
     def supports(self, device: str) -> bool:
@@ -264,7 +275,7 @@ class Room:
         return tuple(d for d in DEVICE_TYPES if self.supports(d))
 
 
-def describe_room_settings(room: Room) -> str:  # noqa: PLR0912
+def describe_room_settings(room: Room) -> str:
     """
     Render a room's full configuration as one log-friendly string (CC-L5).
 
@@ -282,6 +293,7 @@ def describe_room_settings(room: Room) -> str:  # noqa: PLR0912
         if room.ac_power_switch:
             parts.append(f"ac_power_switch={room.ac_power_switch}")
         parts.append(f"ac_fan_only={room.ac_fan_only}")
+        parts.append(f"ac_setpoint_offset={room.ac_setpoint_offset}°F")
     if room.has_heater:
         parts.append(f"heater_climate={room.heater_climate}")
         if room.heater_fan_entity:
@@ -289,8 +301,7 @@ def describe_room_settings(room: Room) -> str:  # noqa: PLR0912
         if room.heater_power_switch:
             parts.append(f"heater_power_switch={room.heater_power_switch}")
         parts.append(f"heater_fan_only={room.heater_fan_only}")
-        if room.heater_max_setpoint is not None:
-            parts.append(f"heater_max_setpoint={room.heater_max_setpoint}°F")
+        parts.append(f"heater_setpoint_offset={room.heater_setpoint_offset}°F")
     if room.has_fan:
         parts.append(f"fan_entities={list(room.fan_entities)}")
     parts.append(f"temperature_sensor={room.temperature_sensor}")

@@ -114,35 +114,50 @@ def _setpoint_needs_send(
     current_setpoint: float | None,
     desired_setpoint: int,
     last_commanded: int | None,
+    decision_mode: str,
+    last_commanded_mode: str | None,
 ) -> bool:
     """
     Whether a ``SetTemperature`` is needed for the current evaluation (CC-19).
 
-    The engine stays stateless — ``last_commanded`` is memory the controller
-    keeps of the whole-°F value it last successfully commanded to this
+    The engine stays stateless — ``last_commanded``/``last_commanded_mode``
+    are memory the controller keeps of the whole-°F value and the HVAC mode
+    it was commanded under, the last time it successfully commanded this
     entity, supplied as input each evaluation.
 
-    With memory available (``last_commanded is not None``), it is trusted
-    **absolutely**: send iff the desired value differs from it
-    (``desired_setpoint != last_commanded``); the reported ``current_setpoint``
-    is not consulted at all. A bounded "drift" re-send was tried and
-    rejected: a device with a coarse enough native grid can echo a
-    commanded value far enough off (e.g. it clamps internally) that any fixed
-    threshold gets crossed on every evaluation, recreating the exact beep
-    loop this dedup exists to prevent. A genuine device-side setpoint change
-    (user remote, device revert) is therefore deliberately **not fought** —
-    it persists until the desired value itself changes, manual mode toggles
-    (which clears memory), or HA restarts (which also clears memory). Manual
-    mode is the sanctioned way to override RCC's setpoint.
+    Memory counts as present **only when its mode matches this evaluation's**
+    ``decision_mode``. On a combined heat pump, Heat's and Cool's desired
+    setpoints can coincidentally collide (e.g. both default to 70 °F —
+    heating target 68 + 2 vs cooling target 72 - 2), so a bare value compare
+    would wrongly treat a Heat→Cool (or Cool→Heat) mode switch as already
+    converged and emit no ``SetTemperature`` at all — exactly the failure
+    CC-35 exists to prevent on a device that keeps a separate internal
+    setpoint per mode. When the modes differ, this unconditionally falls
+    through to the no-memory path below: a decision-mode switch always
+    re-evaluates the setpoint.
 
-    Without memory (fresh start, or after manual mode cleared it): a device
-    that has never reported a setpoint is sent once, unconditionally — memory
-    then takes over on the next evaluation. A reporting device is treated as
-    converged when its echo is less than ``SETPOINT_TOLERANCE`` (1 °F) from
-    desired (absorbing a °C-native device's own whole-°C grid rounding); an
-    echo exactly ``SETPOINT_TOLERANCE`` off is sent.
+    With matching-mode memory available, it is trusted **absolutely**: send
+    iff the desired value differs from it (``desired_setpoint !=
+    last_commanded``); the reported ``current_setpoint`` is not consulted at
+    all. A bounded "drift" re-send was tried and rejected: a device with a
+    coarse enough native grid can echo a commanded value far enough off
+    (e.g. it clamps internally) that any fixed threshold gets crossed on
+    every evaluation, recreating the exact beep loop this dedup exists to
+    prevent. A genuine device-side setpoint change (user remote, device
+    revert) is therefore deliberately **not fought** — it persists until the
+    desired value itself changes, manual mode toggles (which clears memory),
+    or HA restarts (which also clears memory). Manual mode is the sanctioned
+    way to override RCC's setpoint.
+
+    Without matching-mode memory (fresh start, mode switch, or after manual
+    mode cleared it): a device that has never reported a setpoint is sent
+    once, unconditionally — memory then takes over on the next evaluation. A
+    reporting device is treated as converged when its echo is less than
+    ``SETPOINT_TOLERANCE`` (1 °F) from desired (absorbing a °C-native
+    device's own whole-°C grid rounding); an echo exactly
+    ``SETPOINT_TOLERANCE`` off is sent.
     """
-    if last_commanded is not None:
+    if last_commanded is not None and last_commanded_mode == decision_mode:
         return desired_setpoint != last_commanded
     if current_setpoint is None:
         return True
@@ -169,6 +184,11 @@ class ClimateInfo:
     # kept by the controller across evaluations; None when never commanded or
     # the memory was cleared (e.g. while manual mode is active).
     last_commanded_setpoint: int | None = None
+    # HVAC mode RCC commanded this entity under when it recorded
+    # last_commanded_setpoint above (CC-19). Paired with the value above so a
+    # decision-mode switch (Heat<->Cool) is never mistaken for a converged
+    # setpoint just because the two modes' desired values coincide.
+    last_commanded_hvac_mode: str | None = None
 
     @property
     def has_fan(self) -> bool:
@@ -258,11 +278,12 @@ class EngineInputs:
     humidity_target: float | None = None
     humidity_medium: float | None = None  # absolute: target + medium offset
     humidity_high: float | None = None  # absolute: target + high offset
-    # CC-34: configured cap on the heating ceiling (device's true max settable
-    # °F); None when unset. Caps the advertised max_temp before CC-33's ceiling
-    # derivation and the CC-32/CC-19 gate's clamp, so gate and send-time
-    # resolution agree.
-    heater_max_setpoint: int | None = None
+    # CC-35: per-room °F offsets applied to the room target to derive the
+    # device's own setpoint while conditioning (heater: +, A/C: -). Optional
+    # in config, but always present here — the controller resolves an unset
+    # config value to the default before building inputs.
+    heater_setpoint_offset: int = 2
+    ac_setpoint_offset: int = 2
 
     # derived helpers ----------------------------------------------------
     @property
@@ -287,47 +308,34 @@ class EngineInputs:
 
     @property
     def ac_setpoint_int(self) -> int:
-        """Return the AC climate setpoint (device min or 65 °F floor)."""
+        """Return the A/C climate setpoint: room target minus the A/C offset (CC-35)."""
         # The engine controls comfort via fan speed, so the climate's own target
-        # is driven to its lowest settable value (max cooling), or 65 °F when the
-        # device doesn't report a min_temp. The controller re-derives this floor
-        # from the device's *live* range at send time and clamps it (see
-        # clamp_setpoint / CC-9), since the range can be mode-dependent and
-        # reported in whole °F rounded from the device's native unit. Mirrored
-        # for heating by ``heater_setpoint_int`` (CC-33), which drives the
-        # ceiling instead of the floor.
-        min_temp = self.ac.min_temp if self.ac else None
-        return round(min_temp if min_temp is not None else 65)
-
-    @property
-    def heater_max(self) -> float | None:
-        """Effective heating ceiling source: advertised max capped by CC-34."""
-        climate = self.ac if self.combined else self.heater
-        max_temp = climate.max_temp if climate else None
-        if self.heater_max_setpoint is None:
-            return max_temp
-        if max_temp is None:
-            return float(self.heater_max_setpoint)
-        return min(max_temp, float(self.heater_max_setpoint))
+        # only needs to sit comfortably below the room target to keep the
+        # device's internal thermostat from stopping cooling early — it is
+        # *not* driven to the device's extreme (that was CC-9/CC-33's earlier
+        # design, superseded by CC-35). Truncated with int() (CC-5), uniformly
+        # with heating's ``heater_setpoint_int``. The controller clamps the
+        # raw value emitted here into the device's *live* range at send time
+        # (see clamp_setpoint); this property's own clamp-gate use (in
+        # ``_split_ac``/``_combined``) is against the *build-time* snapshot,
+        # so gate and send-time resolution can briefly disagree mid a
+        # mode-transition — the controller's resolved-vs-memory skip in
+        # ``RoomController._run`` (controller.py) absorbs that without
+        # looping.
+        return int(self.target_cooling - self.ac_setpoint_offset)
 
     @property
     def heater_setpoint_int(self) -> int:
-        """Return the heating climate setpoint (device max or 85 °F ceiling)."""
+        """Return the heater setpoint: room target plus the heater offset (CC-35)."""
         # The room-side on/off decision (CC-27 hysteresis against target_heating)
-        # is the sole authority for starting/stopping heat, so the climate's own
-        # target is driven to its highest settable value (max heating), or 85 °F
-        # when the device doesn't report a max_temp — this keeps the device's
-        # internal thermostat from stopping heat early. The 85 °F fallback
-        # mirrors cooling's 65 °F floor (CC-9). The controller re-derives this
-        # ceiling from the device's *live* range at send time and clamps it
-        # (see clamp_setpoint / CC-33).
-        # Unlike cooling's round(min_temp) (rounding a floor up is inward/safe),
-        # a ceiling is truncated with int() (CC-5): rounding it up would be the
-        # unsafe direction, risking a value the device rejects as out of range.
-        # CC-34: the device max is first capped by the configured
-        # heater_max_setpoint override (see ``heater_max``).
-        max_temp = self.heater_max
-        return int(max_temp if max_temp is not None else 85)
+        # is the sole authority for starting/stopping heat; the climate's own
+        # target only needs to overshoot the room target enough to keep the
+        # device's internal thermostat from stopping heat early — it is *not*
+        # driven to the device's extreme (that was CC-33's earlier design,
+        # superseded by CC-35). Truncated with int() (CC-5): rounding it up
+        # would be the unsafe direction, risking a value the device rejects as
+        # out of range. Mirrors cooling's ``ac_setpoint_int``.
+        return int(self.target_heating + self.heater_setpoint_offset)
 
 
 # ---------------------------------------------------------------------------
@@ -525,9 +533,7 @@ def _combined(inp: EngineInputs, out: _Out) -> None:  # noqa: PLR0912
             Delay(inp.command_delay_ms),
             TurnOffClimate(ac.entity_id),
         )
-    desired_setpoint = clamp_setpoint(
-        target, ac.min_temp, inp.heater_max if decision == HEAT else ac.max_temp
-    )
+    desired_setpoint = clamp_setpoint(target, ac.min_temp, ac.max_temp)
     # CC-32: setpoint is meaningless in fan-only, and devices report
     # mode-dependent (sometimes degenerate) ranges there — only send it while
     # actively conditioning.
@@ -535,7 +541,11 @@ def _combined(inp: EngineInputs, out: _Out) -> None:  # noqa: PLR0912
         decision in (COOL, HEAT)
         and ac.supports_set_temp
         and _setpoint_needs_send(
-            ac.current_setpoint, desired_setpoint, ac.last_commanded_setpoint
+            ac.current_setpoint,
+            desired_setpoint,
+            ac.last_commanded_setpoint,
+            decision,
+            ac.last_commanded_hvac_mode,
         )
     ):
         out.add(SetTemperature(ac.entity_id, target, decision))
@@ -603,7 +613,11 @@ def _split_ac(inp: EngineInputs, out: _Out) -> None:
         decision == COOL
         and ac.supports_set_temp
         and _setpoint_needs_send(
-            ac.current_setpoint, desired_setpoint, ac.last_commanded_setpoint
+            ac.current_setpoint,
+            desired_setpoint,
+            ac.last_commanded_setpoint,
+            decision,
+            ac.last_commanded_hvac_mode,
         )
     ):
         out.add(SetTemperature(ac.entity_id, inp.ac_setpoint_int, decision))
@@ -664,21 +678,26 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
             TurnOffClimate(heater.entity_id),
         )
     desired_setpoint = clamp_setpoint(
-        inp.heater_setpoint_int, heater.min_temp, inp.heater_max
+        inp.heater_setpoint_int, heater.min_temp, heater.max_temp
     )
     # CC-32: setpoint is meaningless in fan-only, and devices report
     # mode-dependent (sometimes degenerate) ranges there — only send it while
     # actively conditioning. The gate compares the snapshot-clamped
     # desired_setpoint against memory, while SetTemperature below carries the
-    # raw (unclamped) int — the controller re-derives the extreme from the
-    # live range and clamps at send time, then stores the resolved value
-    # (CC-9/CC-33). The CC-34 cap is applied to both this gate clamp and the
-    # controller's send-time resolution, so CC-19 memory stays self-consistent.
+    # raw (unclamped) int — the controller clamps again against the *live*
+    # range at send time (clamp-only; see ``_resolve_command``) and stores the
+    # resolved value (CC-19/CC-35), so a stale build-time snapshot can briefly
+    # disagree with the live send-time clamp without looping (the controller's
+    # resolved-vs-memory skip in ``_run`` absorbs that).
     if (
         decision == HEAT
         and heater.supports_set_temp
         and _setpoint_needs_send(
-            heater.current_setpoint, desired_setpoint, heater.last_commanded_setpoint
+            heater.current_setpoint,
+            desired_setpoint,
+            heater.last_commanded_setpoint,
+            decision,
+            heater.last_commanded_hvac_mode,
         )
     ):
         out.add(SetTemperature(heater.entity_id, inp.heater_setpoint_int, decision))

@@ -21,6 +21,7 @@ from .const import (
     CONF_AC_FAN_ENTITY,
     CONF_AC_FAN_ONLY,
     CONF_AC_POWER_SWITCH,
+    CONF_AC_SETPOINT_OFFSET,
     CONF_AREA_ID,
     CONF_COMBINED,
     CONF_COMMAND_DELAY,
@@ -31,8 +32,8 @@ from .const import (
     CONF_HEATER_CLIMATE,
     CONF_HEATER_FAN_ENTITY,
     CONF_HEATER_FAN_ONLY,
-    CONF_HEATER_MAX_SETPOINT,
     CONF_HEATER_POWER_SWITCH,
+    CONF_HEATER_SETPOINT_OFFSET,
     CONF_HUMIDITY_SENSOR,
     CONF_LABEL,
     CONF_LIMITS,
@@ -50,6 +51,8 @@ from .const import (
     DEVICE_HEATING,
     DOMAIN,
     LOGGER_CAPABILITIES,
+    SETPOINT_OFFSET_MAX,
+    SETPOINT_OFFSET_MIN,
     SUBENTRY_TYPE_ROOM,
 )
 from .entity import describe_climate_capabilities, describe_fan_capabilities
@@ -119,6 +122,15 @@ _BOOL = selector.BooleanSelector()
 def _temp_number() -> Any:
     return selector.NumberSelector(
         selector.NumberSelectorConfig(min=30, max=110, step=1, mode="box")
+    )
+
+
+def _offset_number() -> Any:
+    """CC-35: NumberSelector for the per-room heater/A/C setpoint offsets."""
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=SETPOINT_OFFSET_MIN, max=SETPOINT_OFFSET_MAX, step=1, mode="box"
+        )
     )
 
 
@@ -409,6 +421,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                 (vol.Optional(CONF_AC_FAN_ENTITY), _FAN),
                 (vol.Optional(CONF_AC_POWER_SWITCH), _SWITCH),
                 (vol.Required(CONF_AC_FAN_ONLY, default=False), _BOOL),
+                (vol.Optional(CONF_AC_SETPOINT_OFFSET), _offset_number()),
             ]
         if self._data.get(CONF_HAS_HEATER) and not self._data.get(CONF_COMBINED):
             fields += [
@@ -418,11 +431,12 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                 (vol.Required(CONF_HEATER_FAN_ONLY, default=False), _BOOL),
             ]
         if self._data.get(CONF_HAS_HEATER):
-            # CC-34: gated on has_heater only, deliberately not "and not
+            # CC-35: gated on has_heater only, deliberately not "and not
             # combined" — a combined room heats through the AC entity and
-            # hides the heater block above, but still needs this cap.
+            # hides the heater block above, but the offset follows the
+            # *decision* (Heat), not the entity, so it still needs this field.
             fields += [
-                (vol.Optional(CONF_HEATER_MAX_SETPOINT), _temp_number()),
+                (vol.Optional(CONF_HEATER_SETPOINT_OFFSET), _offset_number()),
             ]
         if self._data.get(CONF_HAS_FAN):
             fields += [
