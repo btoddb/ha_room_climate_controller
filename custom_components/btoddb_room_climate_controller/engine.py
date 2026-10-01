@@ -228,9 +228,32 @@ class FanControl:
     info: FanInfo
     use: bool
     target: float
-    medium: float  # target + shared medium offset (absolute threshold)
-    high: float  # target + shared high offset (absolute threshold)
+    medium: float  # target + this fan's medium offset (absolute threshold, °F)
+    high: float  # target + this fan's high offset (absolute threshold, °F)
     reverse: bool
+    # Per-fan humidity trigger (CC-28/CC-30/CC-37): this fan's own absolute
+    # %RH thresholds. All None ⇒ the humidity trigger is inactive for this
+    # fan (no humidity sensor, sensor unreadable, or this fan has none set).
+    humidity_target: float | None = None
+    humidity_medium: float | None = None  # absolute: target + medium offset
+    humidity_high: float | None = None  # absolute: target + high offset
+
+
+@dataclass(frozen=True)
+class VentFanControl:
+    """
+    A room's single vent-fan device (CC-36): on/off only, switch or fan domain.
+
+    Triggered by temperature OR humidity against its own targets, same
+    hysteresis as a standalone fan, with no speed tiers/direction/delay.
+    """
+
+    entity_id: str
+    domain: str  # "fan" or "switch" — drives which commands are emitted
+    is_on: bool
+    use: bool
+    target: float
+    humidity_target: float | None = None
 
 
 @dataclass(frozen=True)
@@ -272,12 +295,13 @@ class EngineInputs:
     # window sensor: True when the room's window is open. Suppresses active
     # cooling/heating (Cool/Heat) only — fan-only circulation is unaffected.
     window_open: bool = False
-    # Room-level humidity trigger (standalone fans only). All None ⇒ ignored
-    # (no humidity sensor, sensor unreadable, or room has no fans).
+    # Room humidity reading, shared by every humidity-triggered device (each
+    # fan/vent resolves its own target/offsets against this one reading).
+    # None ⇒ no humidity sensor or it's unreadable.
     room_humidity: float | None = None
-    humidity_target: float | None = None
-    humidity_medium: float | None = None  # absolute: target + medium offset
-    humidity_high: float | None = None  # absolute: target + high offset
+    # The room's single vent-fan device (CC-36); None when unconfigured or its
+    # entity is unavailable.
+    vent_fan: VentFanControl | None = None
     # CC-35: per-room °F offsets applied to the room target to derive the
     # device's own setpoint while conditioning (heater: +, A/C: -). Optional
     # in config, but always present here — the controller resolves an unset
@@ -471,6 +495,8 @@ def compute_commands(inp: EngineInputs) -> list[Command]:
             _split_heater(inp, out)
     for fan in inp.fans:
         _standalone_fan(fan, inp, out)
+    if inp.vent_fan is not None:
+        _vent_fan(inp.vent_fan, inp, out)
     return out.items
 
 
@@ -778,18 +804,20 @@ def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
     info = fan.info
     # CC-13/CC-27: run when Use fan on and past the fan threshold (cooling-style
     # hysteresis keyed on the fan's own reported on/off state). CC-28/CC-29:
-    # room humidity is an independent trigger — the fan runs when *either*
-    # trigger wants it on, and stops only when both decline. The humidity
-    # trigger is inactive unless a reading and all its thresholds resolved.
+    # room humidity is an independent trigger, evaluated against this fan's
+    # *own* target/offsets (CC-37) — the fan runs when *either* trigger wants
+    # it on, and stops only when both decline. The humidity trigger is
+    # inactive unless a reading and all three of this fan's thresholds
+    # resolved.
     temp_wants = _wants_cool(inp.room_temp, fan.target, info.is_on)
     hum_active = (
         inp.room_humidity is not None
-        and inp.humidity_target is not None
-        and inp.humidity_medium is not None
-        and inp.humidity_high is not None
+        and fan.humidity_target is not None
+        and fan.humidity_medium is not None
+        and fan.humidity_high is not None
     )
     hum_wants = hum_active and _wants_fan_for_humidity(
-        inp.room_humidity, inp.humidity_target, info.is_on
+        inp.room_humidity, fan.humidity_target, info.is_on
     )
     needs_on = fan.use and (temp_wants or hum_wants)
     if not needs_on:
@@ -801,7 +829,7 @@ def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
     label, percent = cooling_speed(inp.room_temp, fan.medium, fan.high)
     if hum_active:
         h_label, h_percent = cooling_speed(
-            inp.room_humidity, inp.humidity_medium, inp.humidity_high
+            inp.room_humidity, fan.humidity_medium, fan.humidity_high
         )
         if h_percent > percent:
             label, percent = h_label, h_percent
@@ -825,3 +853,32 @@ def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
                     forward_preset=info.forward_preset,
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# Vent fan (CC-36/CC-37)
+# ---------------------------------------------------------------------------
+def _vent_fan(vent: VentFanControl, inp: EngineInputs, out: _Out) -> None:
+    """
+    Run the room's single vent fan: on/off only, no speed/direction/delay.
+
+    Triggered by temperature OR humidity against the vent's own targets, same
+    hysteresis as a standalone fan (CC-27/CC-30). Idempotent (CC-19): emits a
+    command only on an actual state change. Window-open is never consulted
+    (CC-20 suppresses Cool/Heat only). Domain-native dispatch: a "fan" entity
+    gets FanTurnOn/Off, a "switch" entity gets SwitchTurnOn/Off.
+    """
+    temp_wants = _wants_cool(inp.room_temp, vent.target, vent.is_on)
+    hum_active = inp.room_humidity is not None and vent.humidity_target is not None
+    hum_wants = hum_active and _wants_fan_for_humidity(
+        inp.room_humidity, vent.humidity_target, vent.is_on
+    )
+    needs_on = vent.use and (temp_wants or hum_wants)
+    if needs_on == vent.is_on:
+        return
+    if vent.domain == "fan":
+        out.add(FanTurnOn(vent.entity_id) if needs_on else FanTurnOff(vent.entity_id))
+    else:
+        out.add(
+            SwitchTurnOn(vent.entity_id) if needs_on else SwitchTurnOff(vent.entity_id)
+        )

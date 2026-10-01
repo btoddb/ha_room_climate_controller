@@ -56,6 +56,7 @@ from rc_controller.engine import (  # noqa: E402
     SwitchTurnOff,
     SwitchTurnOn,
     TurnOffClimate,
+    VentFanControl,
 )
 
 
@@ -210,16 +211,56 @@ def test_threshold_context_only_lists_devices_the_room_has():
 
 
 def test_threshold_context_includes_humidity_when_present():
-    """CC-L7: a room with a humidity trigger reports its %RH thresholds."""
+    """CC-L7: a room with a humidity trigger reports the reading + per-fan targets."""
     room = _room(has_ac=True, has_heater=False, has_fan=True)
-    inputs = _inputs(
-        room_humidity=55.0,
+    fan = FanControl(
+        info=FanInfo(
+            "fan.office", is_on=False, preset_mode=None, percentage=0, preset_modes=()
+        ),
+        use=False,
+        target=72.0,
+        medium=75.0,
+        high=78.0,
+        reverse=False,
         humidity_target=60.0,
         humidity_medium=65.0,
         humidity_high=70.0,
     )
+    inputs = _inputs(fans=(fan,), room_humidity=55.0)
     context = _threshold_context(room, inputs)
-    assert "humidity 55% target 60% (med 65% high 70%)" in context
+    assert "humidity 55%" in context
+    assert (
+        "fan office target 72°F (med 75°F high 78°F) "
+        "hum target 60% (med 65% high 70%)" in context
+    )
+
+
+def test_threshold_context_includes_vent_fan():
+    """CC-L7: a room with a vent fan reports its temp + humidity targets."""
+    room = _room(has_ac=False, has_heater=False, has_fan=False)
+    inputs = _inputs(
+        fans=(),
+        room_humidity=55.0,
+        vent_fan=VentFanControl(
+            entity_id="switch.office_vent",
+            domain="switch",
+            is_on=False,
+            use=True,
+            target=72.0,
+            humidity_target=60.0,
+        ),
+    )
+    context = _threshold_context(room, inputs)
+    assert "vent office_vent target 72°F hum target 60%" in context
+
+
+def test_device_label_maps_vent_fan_entity():
+    """CC-L7: the vent fan entity is labeled 'Vent fan' in command descriptions."""
+    room = _room(has_vent_fan=True, vent_fan_entity="switch.office_vent")
+    assert _describe_command(SwitchTurnOn("switch.office_vent"), room) == "Vent fan on"
+    assert (
+        _describe_command(SwitchTurnOff("switch.office_vent"), room) == "Vent fan off"
+    )
 
 
 # -- CC-19 last-commanded-setpoint memory (controller._climate_info) --------

@@ -1,4 +1,5 @@
 import type { RoomClimateControlConfig } from "../types";
+import { entityConfigured } from "../helpers";
 import { getRoomsSync, roomMetaByKey } from "./store";
 import type { RoomPresetConfig } from "./types";
 
@@ -47,7 +48,7 @@ export function buildLiveRoomFromConfig(
       slug: f.slug,
       label: f.label,
       // The live room has no stored preset scalars; the clipboard builder reads
-      // the current on/temp/reverse straight from these entities' states.
+      // the current on/temp/reverse/humidity straight from these entities' states.
       use: false,
       temp: null,
       reverse: false,
@@ -55,6 +56,18 @@ export function buildLiveRoomFromConfig(
       useEntity: f.use,
       tempEntity: f.target,
       reverseEntity: f.reversible ? f.reverse : "",
+      humidity: null,
+      humidityEntity: f.humidity_target,
     })),
+    vent: entityConfigured(config.vent_fan_entity)
+      ? {
+          use: false,
+          temp: null,
+          humidity: null,
+          useEntity: config.use_vent_fan,
+          tempEntity: config.target_vent_fan,
+          humidityEntity: config.vent_humidity_target,
+        }
+      : undefined,
   };
 }

@@ -25,15 +25,20 @@ from .const import (
     HUMIDITY_OFFSET_MAX,
     HUMIDITY_OFFSET_MIN,
     KEY_HIGH_OFFSET,
-    KEY_HUMIDITY_HIGH_OFFSET,
-    KEY_HUMIDITY_MEDIUM_OFFSET,
-    KEY_HUMIDITY_TARGET,
     KEY_MEDIUM_OFFSET,
     KEY_TARGET,
     OFFSET_MAX,
     OFFSET_MIN,
 )
-from .models import Room, fan_slug, fan_target_key, room_uid
+from .models import (
+    Room,
+    fan_humidity_high_key,
+    fan_humidity_medium_key,
+    fan_humidity_target_key,
+    fan_slug,
+    fan_target_key,
+    room_uid,
+)
 
 if TYPE_CHECKING:
     from .hub import RoomClimateConfigEntry
@@ -42,6 +47,11 @@ _LOGGER = logging.getLogger(__name__)
 _INVALID = (None, "", STATE_UNKNOWN, STATE_UNAVAILABLE)
 # Relative humidity can't exceed 100%, so neither can a target + its offset.
 _HUMIDITY_CEILING = 100.0
+
+
+def _fan_label(entity_id: str) -> str:
+    """Human-readable label for a fan entity id (object_id titled)."""
+    return entity_id.rsplit(".", maxsplit=1)[-1].replace("_", " ").title()
 
 
 class ConstraintsValidator:
@@ -109,16 +119,17 @@ class ConstraintsValidator:
                 if eid := self._resolve(key, "number"):
                     ids.add(eid)
             for fan_eid in self.room.fan_entities:
-                if eid := self._resolve(fan_target_key(fan_slug(fan_eid)), "number"):
+                slug = fan_slug(fan_eid)
+                if eid := self._resolve(fan_target_key(slug), "number"):
                     ids.add(eid)
-        if self._has_humidity:
-            for key in (
-                KEY_HUMIDITY_TARGET,
-                KEY_HUMIDITY_MEDIUM_OFFSET,
-                KEY_HUMIDITY_HIGH_OFFSET,
-            ):
-                if eid := self._resolve(key, "number"):
-                    ids.add(eid)
+                if self.room.humidity_sensor:
+                    for key in (
+                        fan_humidity_target_key(slug),
+                        fan_humidity_medium_key(slug),
+                        fan_humidity_high_key(slug),
+                    ):
+                        if eid := self._resolve(key, "number"):
+                            ids.add(eid)
         return frozenset(ids)
 
     @callback
@@ -224,38 +235,46 @@ class ConstraintsValidator:
         )
 
     async def _humidity_order(self) -> None:
-        """Humidity high offset must exceed the medium offset."""
-        med = self._num(KEY_HUMIDITY_MEDIUM_OFFSET)
-        high = self._num(KEY_HUMIDITY_HIGH_OFFSET)
-        if med is None or high is None or med < high:
-            return
-        await self._clamp(
-            KEY_HUMIDITY_HIGH_OFFSET,
-            min(med + 1, HUMIDITY_OFFSET_MAX),
-            "Humidity high offset must exceed the medium offset",
-        )
+        """Humidity high offset must exceed the medium offset (per fan, CC-16)."""
+        for fan_eid in self.room.fan_entities:
+            slug = fan_slug(fan_eid)
+            med = self._num(fan_humidity_medium_key(slug))
+            high = self._num(fan_humidity_high_key(slug))
+            if med is None or high is None or med < high:
+                continue
+            await self._clamp(
+                fan_humidity_high_key(slug),
+                min(med + 1, HUMIDITY_OFFSET_MAX),
+                f"{_fan_label(fan_eid)} humidity high offset must exceed "
+                "the medium offset",
+            )
 
     async def _humidity_bounds(self) -> None:
-        target = self._num(KEY_HUMIDITY_TARGET)
-        high = self._num(KEY_HUMIDITY_HIGH_OFFSET)
-        if target is None or high is None or target + high <= _HUMIDITY_CEILING:
-            return
-        capped = self._humidity_bounded(_HUMIDITY_CEILING - target)
-        await self._clamp(
-            KEY_HUMIDITY_HIGH_OFFSET,
-            capped,
-            "Humidity high offset would exceed 100%",
-        )
-        # Capping the high offset can leave the medium offset at or above it,
-        # so re-apply the ordering rule (CC-16) against the capped value.
-        med = self._num(KEY_HUMIDITY_MEDIUM_OFFSET)
-        if med is None or med < capped:
-            return
-        await self._clamp(
-            KEY_HUMIDITY_MEDIUM_OFFSET,
-            max(capped - 1, HUMIDITY_OFFSET_MIN),
-            "Humidity medium offset must stay below the high offset",
-        )
+        """Humidity target + high offset must not exceed 100% (per fan, CC-18)."""
+        for fan_eid in self.room.fan_entities:
+            slug = fan_slug(fan_eid)
+            target = self._num(fan_humidity_target_key(slug))
+            high = self._num(fan_humidity_high_key(slug))
+            if target is None or high is None or target + high <= _HUMIDITY_CEILING:
+                continue
+            capped = self._humidity_bounded(_HUMIDITY_CEILING - target)
+            await self._clamp(
+                fan_humidity_high_key(slug),
+                capped,
+                f"{_fan_label(fan_eid)} humidity high offset would exceed 100%",
+            )
+            # Capping the high offset can leave the medium offset at or above
+            # it, so re-apply the ordering rule (CC-16) against the capped
+            # value.
+            med = self._num(fan_humidity_medium_key(slug))
+            if med is None or med < capped:
+                continue
+            await self._clamp(
+                fan_humidity_medium_key(slug),
+                max(capped - 1, HUMIDITY_OFFSET_MIN),
+                f"{_fan_label(fan_eid)} humidity medium offset must stay "
+                "below the high offset",
+            )
 
     async def _heating_below_cooling(self) -> None:
         cooling = self._num(KEY_TARGET[DEVICE_COOLING])
@@ -271,8 +290,10 @@ class ConstraintsValidator:
     # -- helpers -------------------------------------------------------------
     @property
     def _has_humidity(self) -> bool:
-        """Whether the room has the humidity target/offset numbers at all."""
-        return bool(self.room.has_fan and self.room.humidity_sensor)
+        """Whether the room has any humidity-triggered device's numbers at all."""
+        return bool(
+            (self.room.has_fan or self.room.has_vent_fan) and self.room.humidity_sensor
+        )
 
     @staticmethod
     def _bounded(value: float) -> float:

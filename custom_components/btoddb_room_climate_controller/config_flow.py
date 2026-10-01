@@ -29,6 +29,7 @@ from .const import (
     CONF_HAS_AC,
     CONF_HAS_FAN,
     CONF_HAS_HEATER,
+    CONF_HAS_VENT_FAN,
     CONF_HEATER_CLIMATE,
     CONF_HEATER_FAN_ENTITY,
     CONF_HEATER_FAN_ONLY,
@@ -42,6 +43,7 @@ from .const import (
     CONF_POWER_SENSOR,
     CONF_ROOM_KEY,
     CONF_TEMPERATURE_SENSOR,
+    CONF_VENT_FAN_ENTITY,
     CONF_WINDOW_SENSORS,
     DEFAULT_COMMAND_DELAY,
     DEFAULT_LIMITS,
@@ -49,6 +51,7 @@ from .const import (
     DEVICE_COOLING,
     DEVICE_FAN,
     DEVICE_HEATING,
+    DEVICE_VENT,
     DOMAIN,
     LOGGER_CAPABILITIES,
     SETPOINT_OFFSET_MAX,
@@ -99,7 +102,7 @@ class RoomClimateConfigFlow(ConfigFlow, domain=DOMAIN):
 # Selectors
 # ---------------------------------------------------------------------------
 def _entity(
-    domain: str,
+    domain: str | list[str],
     *,
     device_classes: list[str] | None = None,
     multiple: bool = False,
@@ -116,6 +119,8 @@ _CLIMATE = _entity("climate")
 _FAN = _entity("fan")
 _FAN_MULTI = _entity("fan", multiple=True)
 _SWITCH = _entity("switch")
+# CC-36: a vent fan is a single on/off switch OR fan entity.
+_SWITCH_OR_FAN = _entity(["switch", "fan"])
 _BOOL = selector.BooleanSelector()
 
 
@@ -183,16 +188,19 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                         CONF_HAS_AC: user_input[CONF_HAS_AC],
                         CONF_HAS_HEATER: user_input[CONF_HAS_HEATER],
                         CONF_HAS_FAN: user_input[CONF_HAS_FAN],
+                        CONF_HAS_VENT_FAN: user_input[CONF_HAS_VENT_FAN],
                         CONF_COMBINED: user_input[CONF_COMBINED],
                     }
                 )
                 _LOGGER.debug(
-                    "[room=%s] basics: label=%r has_ac=%s has_heater=%s has_fan=%s",
+                    "[room=%s] basics: label=%r has_ac=%s has_heater=%s has_fan=%s "
+                    "has_vent_fan=%s",
                     key,
                     label,
                     user_input[CONF_HAS_AC],
                     user_input[CONF_HAS_HEATER],
                     user_input[CONF_HAS_FAN],
+                    user_input[CONF_HAS_VENT_FAN],
                 )
                 return await self.async_step_devices()
 
@@ -204,6 +212,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                 vol.Required(CONF_HAS_AC, default=True): _BOOL,
                 vol.Required(CONF_HAS_HEATER, default=False): _BOOL,
                 vol.Required(CONF_HAS_FAN, default=False): _BOOL,
+                vol.Required(CONF_HAS_VENT_FAN, default=False): _BOOL,
                 vol.Required(CONF_COMBINED, default=False): _BOOL,
             }
         )
@@ -284,6 +293,17 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                     label,
                     describe_fan_capabilities(self.hass, entity_id),
                 )
+        # CC-36: a vent fan on the "fan" domain gets the same capability dump
+        # as the other fan entities above; a "switch" domain vent (like the
+        # A/C/heater power switches) has no capability dump to offer.
+        if (entity_id := self._data.get(CONF_VENT_FAN_ENTITY)) and entity_id.split(".")[
+            0
+        ] == "fan":
+            _CAPABILITIES_LOGGER.info(
+                "[room=%s] Vent fan capabilities: %s",
+                room_key,
+                describe_fan_capabilities(self.hass, entity_id),
+            )
 
     # -- step 3: sensors, limits, timing ------------------------------------
     async def async_step_sensors(
@@ -304,6 +324,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                 (DEVICE_COOLING, "cooling_min", "cooling_max"),
                 (DEVICE_HEATING, "heating_min", "heating_max"),
                 (DEVICE_FAN, "fan_min", "fan_max"),
+                (DEVICE_VENT, "vent_min", "vent_max"),
             ):
                 if lo in user_input and hi in user_input:
                     limits[device] = {
@@ -343,6 +364,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
             (DEVICE_COOLING, "cooling_min", "cooling_max"),
             (DEVICE_HEATING, "heating_min", "heating_max"),
             (DEVICE_FAN, "fan_min", "fan_max"),
+            (DEVICE_VENT, "vent_min", "vent_max"),
         ):
             if not self._device_enabled(device):
                 continue
@@ -376,6 +398,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
             DEVICE_COOLING: self._data.get(CONF_HAS_AC),
             DEVICE_HEATING: self._data.get(CONF_HAS_HEATER),
             DEVICE_FAN: self._data.get(CONF_HAS_FAN),
+            DEVICE_VENT: self._data.get(CONF_HAS_VENT_FAN),
         }.get(device, False)
 
     def _key_taken(self, key: str) -> bool:
@@ -402,6 +425,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
             (DEVICE_COOLING, "cooling_min", "cooling_max"),
             (DEVICE_HEATING, "heating_min", "heating_max"),
             (DEVICE_FAN, "fan_min", "fan_max"),
+            (DEVICE_VENT, "vent_min", "vent_max"),
         ):
             if device in limits:
                 suggested[lo] = limits[device].get("min")
@@ -441,6 +465,10 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
         if self._data.get(CONF_HAS_FAN):
             fields += [
                 (vol.Optional(CONF_FAN_ENTITIES), _FAN_MULTI),
+            ]
+        if self._data.get(CONF_HAS_VENT_FAN):
+            fields += [
+                (vol.Optional(CONF_VENT_FAN_ENTITY), _SWITCH_OR_FAN),
             ]
         return fields
 

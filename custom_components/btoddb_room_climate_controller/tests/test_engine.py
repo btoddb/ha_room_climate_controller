@@ -49,7 +49,9 @@ from rc_pure.engine import (  # noqa: E402
     SetHvacMode,
     SetTemperature,
     SwitchInfo,
+    SwitchTurnOff,
     SwitchTurnOn,
+    VentFanControl,
     any_window_open,
     clamp_setpoint,
     compute_commands,
@@ -103,6 +105,9 @@ def _fan_control(
     percentage_step=1.0,
     reversible=False,
     direction=None,
+    humidity_target=None,
+    humidity_medium=None,
+    humidity_high=None,
 ):
     """Build a FanControl for a single standalone fan (see FanInfo field order)."""
     return FanControl(
@@ -121,6 +126,29 @@ def _fan_control(
         medium=medium,
         high=high,
         reverse=reverse,
+        humidity_target=humidity_target,
+        humidity_medium=humidity_medium,
+        humidity_high=humidity_high,
+    )
+
+
+def _vent(
+    entity_id="switch.vent",
+    *,
+    domain="switch",
+    is_on=False,
+    use=True,
+    target=72.0,
+    humidity_target=None,
+):
+    """Build a VentFanControl (CC-36/CC-37)."""
+    return VentFanControl(
+        entity_id=entity_id,
+        domain=domain,
+        is_on=is_on,
+        use=use,
+        target=target,
+        humidity_target=humidity_target,
     )
 
 
@@ -2079,26 +2107,28 @@ def test_fans_are_independent_turning_one_use_off():
     )
 
 
-# --- humidity as an independent fan trigger (CC-28..CC-31) ------------------
-# Room humidity target is 50 %RH throughout, with the shared offsets giving
-# medium at 55 %RH and high at 60 %RH. The fan's own temperature target stays
-# at the _fan_control default (72 / 75 / 78 °F), so the two triggers can be
-# driven independently.
+# --- humidity as an independent fan trigger (CC-28..CC-31, CC-37) -----------
+# Humidity is per-device (CC-37): this fan's own humidity target is 50 %RH
+# throughout, with its own offsets giving medium at 55 %RH and high at 60
+# %RH. The fan's own temperature target stays at the _fan_control default
+# (72 / 75 / 78 °F), so the two triggers can be driven independently.
 _HUM_TARGET = 50.0
 
 
 def _hum_base(**kw):
-    """Build ``_base()`` inputs with the room-level humidity trigger configured."""
-    defaults = dict(
-        humidity_target=_HUM_TARGET,
-        humidity_medium=_HUM_TARGET + 5.0,
-        humidity_high=_HUM_TARGET + 10.0,
-    )
-    defaults.update(kw)
-    return _base(**defaults)
+    """Alias for ``_base()`` — kept so the humidity tests below read the same."""
+    return _base(**kw)
 
 
-def _hum_fan(*, is_on=False, preset="low", use=True):
+def _hum_fan(
+    *,
+    is_on=False,
+    preset="low",
+    use=True,
+    humidity_target=_HUM_TARGET,
+    humidity_medium=_HUM_TARGET + 5.0,
+    humidity_high=_HUM_TARGET + 10.0,
+):
     """Build a low/medium/high preset fan, optionally running at ``preset``."""
     return _fan_control(
         "fan.tower",
@@ -2107,6 +2137,9 @@ def _hum_fan(*, is_on=False, preset="low", use=True):
         preset_mode=preset if is_on else None,
         percentage={"low": 10, "medium": 50, "high": 100}[preset] if is_on else 0,
         preset_modes=("low", "medium", "high"),
+        humidity_target=humidity_target,
+        humidity_medium=humidity_medium,
+        humidity_high=humidity_high,
     )
 
 
@@ -2138,29 +2171,30 @@ def test_humidity_unconfigured_matches_temperature_only():
     def run(room_temp, fan, **kw):
         return compute_commands(_base(fans=(fan,), room_temp=room_temp, **kw))
 
-    nulls = dict(
-        room_humidity=None,
-        humidity_target=None,
-        humidity_medium=None,
-        humidity_high=None,
-    )
+    no_thresholds = dict(humidity_target=None, humidity_medium=None, humidity_high=None)
     # Starts on temperature alone, at the temperature tier.
     started = run(76.0, _hum_fan())
-    assert started == run(76.0, _hum_fan(), **nulls)
+    assert started == run(76.0, _hum_fan(**no_thresholds))
     assert _types(started) == ["FanTurnOn", "Delay", "FanSetPreset"]
     assert started[2].preset_mode == "medium"
 
     # Stops on temperature alone (CC-27 deadband) with no humidity to hold it on.
     stopped = run(72.1, _hum_fan(is_on=True))
-    assert stopped == run(72.1, _hum_fan(is_on=True), **nulls)
+    assert stopped == run(72.1, _hum_fan(is_on=True, **no_thresholds))
     assert stopped == [FanTurnOff("fan.tower")]
 
 
 def test_humidity_partially_configured_is_ignored():
     """CC-28: a humidity reading without thresholds (or vice versa) is ignored."""
-    # Very humid, but no target/thresholds resolved -> temperature decides.
+    # Very humid, but no target/thresholds resolved on the fan -> temperature
+    # decides.
+    no_thresholds = dict(humidity_target=None, humidity_medium=None, humidity_high=None)
     cmds = compute_commands(
-        _base(fans=(_hum_fan(is_on=True),), room_temp=72.1, room_humidity=90.0)
+        _base(
+            fans=(_hum_fan(is_on=True, **no_thresholds),),
+            room_temp=72.1,
+            room_humidity=90.0,
+        )
     )
     assert cmds == [FanTurnOff("fan.tower")]
 
@@ -2277,17 +2311,18 @@ def test_fan_speed_is_the_faster_of_the_two_triggers():
 def test_humidity_speed_tiers_truncate():
     """CC-5: humidity tiers truncate too — 64.9 %RH is not yet the 65 %RH tier."""
     thresholds = dict(humidity_target=55.0, humidity_medium=60.0, humidity_high=65.0)
-    running_medium = dict(
-        fans=(_hum_fan(is_on=True, preset="medium"),),
-        room_temp=68.0,  # low temperature tier, so humidity drives the speed
-    )
-    cmds = compute_commands(_base(**running_medium, room_humidity=64.9, **thresholds))
-    assert cmds == []
 
-    cmds_high = compute_commands(
-        _base(**running_medium, room_humidity=65.0, **thresholds)
-    )
-    assert cmds_high == [FanSetPreset("fan.tower", "high")]
+    def run(room_humidity):
+        return compute_commands(
+            _base(
+                fans=(_hum_fan(is_on=True, preset="medium", **thresholds),),
+                room_temp=68.0,  # low temperature tier, so humidity drives speed
+                room_humidity=room_humidity,
+            )
+        )
+
+    assert run(64.9) == []
+    assert run(65.0) == [FanSetPreset("fan.tower", "high")]
 
 
 def test_running_fan_is_held_by_temperature_band_after_humidity_declines():
@@ -2335,3 +2370,204 @@ def test_humidity_restart_cycle():
 
     cmds_on = compute_commands(_hum_base(**idle, room_humidity=52.0))
     assert cmds_on[0] == FanTurnOn("fan.tower")
+
+
+def test_two_fans_with_different_humidity_targets_are_independent():
+    """CC-37: each fan's humidity trigger uses only its own target/offsets."""
+    fan_low_target = _fan_control(
+        "fan.a",
+        is_on=False,
+        target=72.0,
+        humidity_target=40.0,
+        humidity_medium=45.0,
+        humidity_high=50.0,
+    )
+    fan_high_target = _fan_control(
+        "fan.b",
+        is_on=False,
+        target=72.0,
+        humidity_target=70.0,
+        humidity_medium=75.0,
+        humidity_high=80.0,
+    )
+    # room_temp=72 keeps temperature inert for both fans (restart is 73).
+    cmds = compute_commands(
+        _base(
+            fans=(fan_low_target, fan_high_target), room_temp=72.0, room_humidity=60.0
+        )
+    )
+    # 60 %RH clears fan.a's restart threshold (40+2=42) but not fan.b's (70+2=72).
+    assert [c.entity_id for c in cmds if isinstance(c, FanTurnOn)] == ["fan.a"]
+
+
+def test_fan_without_humidity_and_vent_with_humidity_react_independently():
+    """CC-37: a fan with no humidity set ignores it; the vent (with its own) reacts."""
+    fan = _fan_control("fan.a", is_on=False, target=90.0)  # inert at room_temp=72
+    vent = _vent(target=90.0, humidity_target=50.0, use=True)
+    cmds = compute_commands(
+        _base(fans=(fan,), vent_fan=vent, room_temp=72.0, room_humidity=90.0)
+    )
+    assert cmds == [SwitchTurnOn("switch.vent")]
+
+
+# --- vent fan (CC-36/CC-37) --------------------------------------------------
+def test_vent_fan_inert_when_use_off():
+    """CC-36: Use off means the vent never turns on, regardless of triggers."""
+    cmds = compute_commands(
+        _base(
+            vent_fan=_vent(use=False, target=72.0, humidity_target=50.0),
+            room_temp=90.0,
+            room_humidity=90.0,
+        )
+    )
+    assert cmds == []
+
+
+def test_vent_fan_use_off_turns_off_a_running_vent():
+    """CC-36: Use off while the vent is running emits exactly one turn-off."""
+    cmds = compute_commands(
+        _base(
+            vent_fan=_vent(use=False, is_on=True, target=72.0, humidity_target=50.0),
+            room_temp=90.0,
+            room_humidity=90.0,
+        )
+    )
+    assert cmds == [SwitchTurnOff("switch.vent")]
+
+    cmds_already_off = compute_commands(
+        _base(
+            vent_fan=_vent(use=False, is_on=False, target=72.0, humidity_target=50.0),
+            room_temp=90.0,
+            room_humidity=90.0,
+        )
+    )
+    assert cmds_already_off == []
+
+
+def test_vent_fan_temp_hysteresis():
+    """CC-27/CC-36: the vent turns on at target+1.0, holds until target+0.2."""
+    assert (
+        compute_commands(
+            _base(vent_fan=_vent(target=72.0, is_on=False), room_temp=72.9)
+        )
+        == []
+    )
+    assert compute_commands(
+        _base(vent_fan=_vent(target=72.0, is_on=False), room_temp=73.0)
+    ) == [SwitchTurnOn("switch.vent")]
+    assert (
+        compute_commands(_base(vent_fan=_vent(target=72.0, is_on=True), room_temp=72.3))
+        == []
+    )
+    assert compute_commands(
+        _base(vent_fan=_vent(target=72.0, is_on=True), room_temp=72.2)
+    ) == [SwitchTurnOff("switch.vent")]
+
+
+def test_vent_fan_humidity_hysteresis():
+    """CC-30/CC-37: the vent's humidity trigger uses its own target."""
+    vent_off = _vent(target=72.0, is_on=False, humidity_target=50.0)
+    assert (
+        compute_commands(_base(vent_fan=vent_off, room_temp=72.0, room_humidity=51.9))
+        == []
+    )
+    assert compute_commands(
+        _base(vent_fan=vent_off, room_temp=72.0, room_humidity=52.0)
+    ) == [SwitchTurnOn("switch.vent")]
+
+    vent_on = _vent(target=72.0, is_on=True, humidity_target=50.0)
+    assert (
+        compute_commands(_base(vent_fan=vent_on, room_temp=72.0, room_humidity=50.6))
+        == []
+    )
+    assert compute_commands(
+        _base(vent_fan=vent_on, room_temp=72.0, room_humidity=50.5)
+    ) == [SwitchTurnOff("switch.vent")]
+
+
+def test_vent_fan_or_semantics():
+    """CC-29/CC-36: the vent runs on either trigger, stops only when both decline."""
+    vent_off = _vent(target=72.0, is_on=False, humidity_target=50.0)
+    assert compute_commands(
+        _base(vent_fan=vent_off, room_temp=73.0, room_humidity=40.0)
+    ) == [SwitchTurnOn("switch.vent")]
+
+    vent_on = _vent(target=72.0, is_on=True, humidity_target=50.0)
+    # Temperature declines into the deadband, but humidity still wants it on.
+    assert (
+        compute_commands(_base(vent_fan=vent_on, room_temp=72.1, room_humidity=52.0))
+        == []
+    )
+    # Both decline -> turns off.
+    assert compute_commands(
+        _base(vent_fan=vent_on, room_temp=72.1, room_humidity=50.0)
+    ) == [SwitchTurnOff("switch.vent")]
+
+
+def test_vent_fan_idempotent():
+    """CC-19: no command is emitted when the reported state already matches."""
+    already_on = _vent(target=72.0, is_on=True, use=True)
+    assert compute_commands(_base(vent_fan=already_on, room_temp=90.0)) == []
+
+    already_off = _vent(target=72.0, is_on=False, use=False)
+    assert compute_commands(_base(vent_fan=already_off, room_temp=90.0)) == []
+
+
+def test_vent_fan_domain_dispatch():
+    """CC-36: a 'switch' domain vent gets Switch commands, 'fan' gets Fan commands."""
+    cmds_switch = compute_commands(
+        _base(
+            vent_fan=_vent(entity_id="switch.vent", domain="switch", target=72.0),
+            room_temp=90.0,
+        )
+    )
+    assert cmds_switch == [SwitchTurnOn("switch.vent")]
+
+    cmds_fan = compute_commands(
+        _base(
+            vent_fan=_vent(entity_id="fan.vent", domain="fan", target=72.0),
+            room_temp=90.0,
+        )
+    )
+    assert cmds_fan == [FanTurnOn("fan.vent")]
+
+
+def test_vent_fan_ignores_window_open():
+    """CC-20: window-open suppresses Cool/Heat only — the vent fan is exempt."""
+    cmds = compute_commands(
+        _base(vent_fan=_vent(target=72.0), room_temp=90.0, window_open=True)
+    )
+    assert cmds == [SwitchTurnOn("switch.vent")]
+
+
+def test_vent_fan_humidity_none_is_temperature_only():
+    """CC-31: a missing humidity reading degrades the vent to temperature-only."""
+    cmds = compute_commands(
+        _base(
+            vent_fan=_vent(target=72.0, humidity_target=50.0),
+            room_temp=90.0,
+            room_humidity=None,
+        )
+    )
+    assert cmds == [SwitchTurnOn("switch.vent")]
+
+    cmds_off = compute_commands(
+        _base(
+            vent_fan=_vent(target=72.0, humidity_target=50.0, is_on=True),
+            room_temp=72.0,
+            room_humidity=None,
+        )
+    )
+    assert cmds_off == [SwitchTurnOff("switch.vent")]
+
+
+def test_vent_fan_hot_and_humid_emits_a_single_on_command():
+    """CC-36: no speed/preset/direction command is ever emitted for the vent."""
+    cmds = compute_commands(
+        _base(
+            vent_fan=_vent(target=72.0, humidity_target=50.0),
+            room_temp=90.0,
+            room_humidity=90.0,
+        )
+    )
+    assert cmds == [SwitchTurnOn("switch.vent")]

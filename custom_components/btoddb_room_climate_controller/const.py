@@ -39,21 +39,27 @@ SIGNAL_ADD_ROOM_ENTITIES: Final = f"{DOMAIN}_add_room_entities"
 SIGNAL_ADD_PROFILE_ENTITIES: Final = f"{DOMAIN}_add_profile_entities"
 SIGNAL_REMOVE_PROFILE: Final = f"{DOMAIN}_remove_profile"
 
-# --- Device types (cooling / heating / fan) ---------------------------------
+# --- Device types (cooling / heating / fan / vent fan) -----------------------
 DEVICE_COOLING: Final = "cooling"
 DEVICE_HEATING: Final = "heating"
 DEVICE_FAN: Final = "fan"
-DEVICE_TYPES: Final = (DEVICE_COOLING, DEVICE_HEATING, DEVICE_FAN)
+# CC-36: a single on/off switch|fan entity, triggered by temp OR humidity
+# against its own targets — appended last so the generic per-device loops
+# (Use switch, target number, profile preset) pick it up for free.
+DEVICE_VENT: Final = "vent_fan"
+DEVICE_TYPES: Final = (DEVICE_COOLING, DEVICE_HEATING, DEVICE_FAN, DEVICE_VENT)
 
 DEVICE_ICONS: Final = {
     DEVICE_COOLING: "mdi:snowflake-thermometer",
     DEVICE_HEATING: "mdi:thermometer-high",
     DEVICE_FAN: "mdi:fan",
+    DEVICE_VENT: "mdi:fan-clock",
 }
 DEVICE_USE_ICONS: Final = {
     DEVICE_COOLING: "mdi:snowflake",
     DEVICE_HEATING: "mdi:fire",
     DEVICE_FAN: "mdi:fan",
+    DEVICE_VENT: "mdi:fan-clock",
 }
 
 # --- Room subentry config keys ----------------------------------------------
@@ -64,6 +70,7 @@ CONF_AREA_ID: Final = "area_id"
 CONF_HAS_AC: Final = "has_ac"
 CONF_HAS_HEATER: Final = "has_heater"
 CONF_HAS_FAN: Final = "has_fan"
+CONF_HAS_VENT_FAN: Final = "has_vent_fan"
 CONF_COMBINED: Final = "combined"  # ac_climate == heater_climate (heat pump)
 
 # Device entities driven by the reactive engine
@@ -71,6 +78,7 @@ CONF_AC_CLIMATE: Final = "ac_climate"
 CONF_HEATER_CLIMATE: Final = "heater_climate"
 CONF_FAN_ENTITIES: Final = "fan_entities"
 CONF_FAN_ENTITY_LEGACY: Final = "fan_entity"  # pre-#66 single-fan key
+CONF_VENT_FAN_ENTITY: Final = "vent_fan_entity"  # switch OR fan domain (CC-36)
 CONF_AC_FAN_ENTITY: Final = "ac_fan_entity"
 CONF_HEATER_FAN_ENTITY: Final = "heater_fan_entity"
 CONF_AC_POWER_SWITCH: Final = "ac_power_switch"
@@ -115,6 +123,7 @@ DEFAULT_LIMITS: Final = {
     DEVICE_COOLING: {"min": 60, "max": 86},
     DEVICE_HEATING: {"min": 45, "max": 95},
     DEVICE_FAN: {"min": 60, "max": 86},
+    DEVICE_VENT: {"min": 60, "max": 86},
 }
 
 # Fan speed offset bounds (°F above/below target that bump speed low→med→high).
@@ -152,25 +161,39 @@ KEY_TARGET: Final = {
     DEVICE_COOLING: "target_cooling_temp",
     DEVICE_HEATING: "target_heating_temp",
     DEVICE_FAN: "target_fan_temp",
+    DEVICE_VENT: "target_vent_fan_temp",
 }
+# Vent fan has no fan-speed offsets (on/off only, CC-36); these dummy entries
+# exist only so the generic per-device loops that index KEY_MEDIUM_OFFSET /
+# KEY_HIGH_OFFSET by device type never KeyError on DEVICE_VENT. No entity is
+# ever created under them — resolving them always serializes null.
 KEY_MEDIUM_OFFSET: Final = {
     DEVICE_COOLING: "cooling_medium_offset",
     DEVICE_HEATING: "heating_medium_offset",
     DEVICE_FAN: "fan_medium_offset",
+    DEVICE_VENT: "vent_fan_medium_offset",
 }
 KEY_HIGH_OFFSET: Final = {
     DEVICE_COOLING: "cooling_high_offset",
     DEVICE_HEATING: "heating_high_offset",
     DEVICE_FAN: "fan_high_offset",
+    DEVICE_VENT: "vent_fan_high_offset",
 }
 KEY_USE: Final = {
     DEVICE_COOLING: "use_ac",
     DEVICE_HEATING: "use_heater",
     DEVICE_FAN: "use_fan",
+    DEVICE_VENT: "use_vent_fan",
 }
+# Legacy shared room-level humidity entities (CC-28, pre-#77). Kept only so
+# __init__.py's one-time registry cleanup can find and remove them; no entity
+# is created under them anymore — humidity is per-device (see
+# fan_humidity_*_key / KEY_VENT_HUMIDITY_TARGET in models.py).
 KEY_HUMIDITY_TARGET: Final = "humidity_target"
 KEY_HUMIDITY_MEDIUM_OFFSET: Final = "humidity_medium_offset"
 KEY_HUMIDITY_HIGH_OFFSET: Final = "humidity_high_offset"
+# Vent fan's own humidity target (gated on the room having a humidity sensor).
+KEY_VENT_HUMIDITY_TARGET: Final = "vent_fan_humidity_target"
 KEY_MANUAL_MODE: Final = "manual_mode"
 KEY_AC_FAN_ONLY: Final = "ac_fan_only_override"
 KEY_HEATER_FAN_ONLY: Final = "heater_fan_only_override"
@@ -190,12 +213,16 @@ KEY_PROFILE_PRESET: Final = {  # preset target temp per device
     DEVICE_COOLING: "cooling",
     DEVICE_HEATING: "heating",
     DEVICE_FAN: "fan",
+    DEVICE_VENT: "vent_fan",
 }
 KEY_PROFILE_USE: Final = {  # preset use toggle per device
     DEVICE_COOLING: "use_cooling",
     DEVICE_HEATING: "use_heating",
     DEVICE_FAN: "use_fan",
+    DEVICE_VENT: "use_vent_fan",
 }
+# Vent fan's profile humidity-target preset entity (PR-13).
+KEY_PROFILE_VENT_HUMIDITY: Final = "vent_fan_humidity"
 
 # --- Profile record keys ----------------------------------------------------
 ATTR_PROFILE_ID: Final = "profile_id"

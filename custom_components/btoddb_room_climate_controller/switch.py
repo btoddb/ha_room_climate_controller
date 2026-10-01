@@ -69,6 +69,7 @@ def _room_specs(room: Room) -> list[_SwitchSpec]:
             name={
                 "cooling": "Use A/C",
                 "heating": "Use heater",
+                "vent_fan": "Use vent fan",
             }[device],
             icon=DEVICE_USE_ICONS[device],
         )
@@ -308,6 +309,7 @@ class ProfileUseSwitch(_BaseProfileSwitch):
             "cooling": "Use cooling",
             "heating": "Use heating",
             "fan": "Use fan",
+            "vent_fan": "Use vent fan",
         }[device]
         self._attr_icon = DEVICE_USE_ICONS[device]
         preset = profile.presets.get(device)

@@ -15,7 +15,13 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .const import DOMAIN, SIGNAL_REMOVE_PROFILE
+from .const import (
+    DOMAIN,
+    KEY_HUMIDITY_HIGH_OFFSET,
+    KEY_HUMIDITY_MEDIUM_OFFSET,
+    KEY_HUMIDITY_TARGET,
+    SIGNAL_REMOVE_PROFILE,
+)
 from .models import (
     Profile,
     Room,
@@ -295,6 +301,75 @@ def async_migrate_fan_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> Non
                 "switch",
                 profile_uid(rid, profile.id, "fan_reverse"),
                 profile_uid(rid, profile.id, profile_fan_reverse_key(slug)),
+            )
+
+
+# The pre-#77 shared room-level humidity entities' exact original names,
+# used as a discriminator against a unique_id collision (see the docstring
+# below).
+_LEGACY_HUMIDITY_NAMES = {
+    KEY_HUMIDITY_TARGET: "Humidity target",
+    KEY_HUMIDITY_MEDIUM_OFFSET: "Humidity medium offset",
+    KEY_HUMIDITY_HIGH_OFFSET: "Humidity high offset",
+}
+
+
+@callback
+def async_cleanup_legacy_humidity_entities(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """
+    Remove the pre-#77 shared room-level humidity target/offset entities.
+
+    CC-28 moved humidity to a target + offsets per humidity-triggered device;
+    the old shared-per-room entities are never recreated, so any registry
+    entries left from before the upgrade are stale and are removed outright
+    (clean cutover, no value migration — release note: humidity customizations
+    reset to the new per-device defaults). Idempotent: a second run finds
+    nothing to remove. Must run before platform setup, so a freshly created
+    entity can never be the one removed.
+    """
+    hub = getattr(entry, "runtime_data", None)
+    if hub is None:
+        return
+    ent_reg = er.async_get(hass)
+    rid = entry.entry_id
+    for room in hub.rooms.values():
+        for key, legacy_name in _LEGACY_HUMIDITY_NAMES.items():
+            entity_id = ent_reg.async_get_entity_id(
+                "number", DOMAIN, room_uid(rid, room.key, key)
+            )
+            if entity_id is None:
+                continue
+            # Guard against a unique_id collision: e.g. a room literally keyed
+            # "<x>_vent_fan" makes room_uid(rid, "<x>_vent_fan",
+            # "humidity_target") equal room_uid(rid, "<x>",
+            # "vent_fan_humidity_target") — the *current* vent humidity-target
+            # entity for room "<x>". Only remove the entry when its name
+            # really matches one of the pre-#77 shared humidity entities.
+            registry_entry = ent_reg.entities.get(entity_id)
+            entry_name = (
+                registry_entry.name or registry_entry.original_name
+                if registry_entry is not None
+                else None
+            )
+            if entry_name != legacy_name:
+                _LOGGER.debug(
+                    "Skipped %s (room=%s, key=%s): name %r doesn't match the "
+                    "legacy entity, likely a unique_id collision with a "
+                    "current entity",
+                    entity_id,
+                    room.key,
+                    key,
+                    entry_name,
+                )
+                continue
+            ent_reg.async_remove(entity_id)
+            _LOGGER.debug(
+                "Removed legacy shared humidity entity %s (room=%s, key=%s)",
+                entity_id,
+                room.key,
+                key,
             )
 
 

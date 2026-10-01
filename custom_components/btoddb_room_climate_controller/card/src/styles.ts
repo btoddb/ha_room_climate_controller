@@ -78,16 +78,36 @@ export const cardStyles = css`
     flex-shrink: 0;
   }
 
-  .temp-arrows-spacer {
-    width: 36px;
-    flex-shrink: 0;
-  }
-
   .temp-arrow-btn {
     width: 32px;
     height: 20px;
     padding: 0;
     --mdc-icon-size: 18px;
+  }
+
+  /* A value+arrows column (temp or humidity, UX-9): the target value sits above
+     the arrow pair in a fixed line-height so rows never shift whether a row's
+     humidity stack is present or replaced by a spacer (UX-6). */
+  .target-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    width: 36px;
+    flex-shrink: 0;
+  }
+
+  .target-stack-spacer {
+    width: 36px;
+    flex-shrink: 0;
+  }
+
+  .target-value {
+    font-size: 0.7rem;
+    line-height: 14px;
+    color: var(--secondary-text-color);
+    white-space: nowrap;
   }
 
   .device-info {

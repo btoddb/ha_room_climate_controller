@@ -28,6 +28,7 @@ from .const import (
     CONF_HAS_AC,
     CONF_HAS_FAN,
     CONF_HAS_HEATER,
+    CONF_HAS_VENT_FAN,
     CONF_HEATER_CLIMATE,
     CONF_HEATER_FAN_ENTITY,
     CONF_HEATER_FAN_ONLY,
@@ -40,8 +41,10 @@ from .const import (
     CONF_POWER_SENSOR,
     CONF_ROOM_KEY,
     CONF_TEMPERATURE_SENSOR,
+    CONF_VENT_FAN_ENTITY,
     CONF_WINDOW_SENSORS,
     DEFAULT_COMMAND_DELAY,
+    DEFAULT_HUMIDITY_TARGET,
     DEFAULT_LIMITS,
     DEFAULT_POWER_ON_DELAY,
     DEFAULT_SETPOINT_OFFSET,
@@ -49,6 +52,7 @@ from .const import (
     DEVICE_FAN,
     DEVICE_HEATING,
     DEVICE_TYPES,
+    DEVICE_VENT,
     PROFILE_DEFAULT_ICON,
 )
 
@@ -124,6 +128,28 @@ def profile_fan_use_key(slug: str) -> str:
 def profile_fan_reverse_key(slug: str) -> str:
     """Profile per-fan preset Reverse-switch entity key suffix."""
     return f"fan_reverse_{slug}"
+
+
+# Per-fan ROOM humidity-trigger key builders (CC-36/CC-37: humidity is now
+# per-device, not shared across a room's fans).
+def fan_humidity_target_key(slug: str) -> str:
+    """Room per-fan humidity-target entity key suffix."""
+    return f"fan_humidity_target__{slug}"
+
+
+def fan_humidity_medium_key(slug: str) -> str:
+    """Room per-fan humidity-medium-offset entity key suffix."""
+    return f"fan_humidity_medium_offset__{slug}"
+
+
+def fan_humidity_high_key(slug: str) -> str:
+    """Room per-fan humidity-high-offset entity key suffix."""
+    return f"fan_humidity_high_offset__{slug}"
+
+
+def profile_fan_humidity_key(slug: str) -> str:
+    """Profile per-fan preset humidity-target entity key suffix."""
+    return f"fan_humidity_{slug}"
 
 
 def next_profile_id(existing_ids: Iterable[str]) -> str:
@@ -208,6 +234,8 @@ class Room:
     power_on_delay: float
     heater_setpoint_offset: int
     ac_setpoint_offset: int
+    has_vent_fan: bool = False
+    vent_fan_entity: str | None = None
 
     @classmethod
     def from_subentry(cls, subentry_id: str, data: Mapping[str, Any]) -> Room:
@@ -257,22 +285,46 @@ class Room:
             # iterates the raw mapping, so no migration is needed.
             heater_setpoint_offset=_parse_offset(data.get(CONF_HEATER_SETPOINT_OFFSET)),
             ac_setpoint_offset=_parse_offset(data.get(CONF_AC_SETPOINT_OFFSET)),
+            has_vent_fan=bool(data.get(CONF_HAS_VENT_FAN, False)),
+            vent_fan_entity=data.get(CONF_VENT_FAN_ENTITY) or None,
         )
 
     def supports(self, device: str) -> bool:
-        """Whether this room has the given device type (cooling/heating/fan)."""
+        """Whether this room has the given device type (cooling/heating/fan/vent)."""
         if device == DEVICE_COOLING:
             return self.has_ac
         if device == DEVICE_HEATING:
             return self.has_heater
         if device == DEVICE_FAN:
             return self.has_fan
+        if device == DEVICE_VENT:
+            return self.has_vent_fan
         return False
 
     @property
     def devices(self) -> tuple[str, ...]:
         """Device types available in this room, in canonical order."""
         return tuple(d for d in DEVICE_TYPES if self.supports(d))
+
+
+def _describe_ac_settings(room: Room, parts: list[str]) -> None:
+    parts.append(f"ac_climate={room.ac_climate}")
+    if room.ac_fan_entity:
+        parts.append(f"ac_fan_entity={room.ac_fan_entity}")
+    if room.ac_power_switch:
+        parts.append(f"ac_power_switch={room.ac_power_switch}")
+    parts.append(f"ac_fan_only={room.ac_fan_only}")
+    parts.append(f"ac_setpoint_offset={room.ac_setpoint_offset}°F")
+
+
+def _describe_heater_settings(room: Room, parts: list[str]) -> None:
+    parts.append(f"heater_climate={room.heater_climate}")
+    if room.heater_fan_entity:
+        parts.append(f"heater_fan_entity={room.heater_fan_entity}")
+    if room.heater_power_switch:
+        parts.append(f"heater_power_switch={room.heater_power_switch}")
+    parts.append(f"heater_fan_only={room.heater_fan_only}")
+    parts.append(f"heater_setpoint_offset={room.heater_setpoint_offset}°F")
 
 
 def describe_room_settings(room: Room) -> str:
@@ -287,23 +339,13 @@ def describe_room_settings(room: Room) -> str:
         f"combined={room.combined}",
     ]
     if room.has_ac:
-        parts.append(f"ac_climate={room.ac_climate}")
-        if room.ac_fan_entity:
-            parts.append(f"ac_fan_entity={room.ac_fan_entity}")
-        if room.ac_power_switch:
-            parts.append(f"ac_power_switch={room.ac_power_switch}")
-        parts.append(f"ac_fan_only={room.ac_fan_only}")
-        parts.append(f"ac_setpoint_offset={room.ac_setpoint_offset}°F")
+        _describe_ac_settings(room, parts)
     if room.has_heater:
-        parts.append(f"heater_climate={room.heater_climate}")
-        if room.heater_fan_entity:
-            parts.append(f"heater_fan_entity={room.heater_fan_entity}")
-        if room.heater_power_switch:
-            parts.append(f"heater_power_switch={room.heater_power_switch}")
-        parts.append(f"heater_fan_only={room.heater_fan_only}")
-        parts.append(f"heater_setpoint_offset={room.heater_setpoint_offset}°F")
+        _describe_heater_settings(room, parts)
     if room.has_fan:
         parts.append(f"fan_entities={list(room.fan_entities)}")
+    if room.has_vent_fan:
+        parts.append(f"vent_fan_entity={room.vent_fan_entity}")
     parts.append(f"temperature_sensor={room.temperature_sensor}")
     if room.humidity_sensor:
         parts.append(f"humidity_sensor={room.humidity_sensor}")
@@ -330,6 +372,9 @@ class DevicePreset:
 
     use: bool = False
     temp: float = 0.0
+    # Humidity-target preset (PR-13); only meaningful for the vent fan device —
+    # cooling/heating presets leave this None.
+    humidity: float | None = None
 
 
 @dataclass
@@ -339,6 +384,9 @@ class FanPreset:
     use: bool = False
     temp: float = 0.0
     reverse: bool = False
+    # Per-fan humidity-target preset (PR-14); None when the room has no
+    # humidity sensor. Humidity offsets stay live-only (not captured here).
+    humidity: float | None = None
 
 
 @dataclass
@@ -359,17 +407,24 @@ class Profile:
     @classmethod
     def with_defaults(cls, *, profile_id: str, name: str, room: Room) -> Profile:
         """Create a profile with preset defaults (uses off, temps at room min)."""
+        humidity = DEFAULT_HUMIDITY_TARGET if room.humidity_sensor else None
         return cls(
             id=format_profile_id(profile_id),
             name=name.strip(),
             room=room.key,
             presets={
-                device: DevicePreset(use=False, temp=room.limits[device]["min"])
+                device: DevicePreset(
+                    use=False,
+                    temp=room.limits[device]["min"],
+                    humidity=humidity if device == DEVICE_VENT else None,
+                )
                 for device in room.devices
                 if device != DEVICE_FAN
             },
             fan_presets={
-                fan_slug(eid): FanPreset(use=False, temp=room.limits[DEVICE_FAN]["min"])
+                fan_slug(eid): FanPreset(
+                    use=False, temp=room.limits[DEVICE_FAN]["min"], humidity=humidity
+                )
                 for eid in room.fan_entities
             },
         )
@@ -386,11 +441,16 @@ class Profile:
             "fan_override": self.fan_override,
             "fan_reverse": self.fan_reverse,
             "presets": {
-                device: {"use": p.use, "temp": p.temp}
+                device: {"use": p.use, "temp": p.temp, "humidity": p.humidity}
                 for device, p in self.presets.items()
             },
             "fan_presets": {
-                slug: {"use": p.use, "temp": p.temp, "reverse": p.reverse}
+                slug: {
+                    "use": p.use,
+                    "temp": p.temp,
+                    "reverse": p.reverse,
+                    "humidity": p.humidity,
+                }
                 for slug, p in self.fan_presets.items()
             },
         }
@@ -411,6 +471,7 @@ class Profile:
                 device: DevicePreset(
                     use=bool(p.get("use", False)),
                     temp=float(p.get("temp", 0.0)),
+                    humidity=(h if (h := p.get("humidity")) is None else float(h)),
                 )
                 for device, p in (data.get("presets") or {}).items()
             },
@@ -419,6 +480,7 @@ class Profile:
                     use=bool(p.get("use", False)),
                     temp=float(p.get("temp", 0.0)),
                     reverse=bool(p.get("reverse", False)),
+                    humidity=(h if (h := p.get("humidity")) is None else float(h)),
                 )
                 for slug, p in (data.get("fan_presets") or {}).items()
             },
@@ -473,16 +535,23 @@ class Profile:
 
     def reassigned_to(self, room: Room) -> Profile:
         """Return a copy moved to ``room``, re-seeding presets for its devices."""
+        humidity = DEFAULT_HUMIDITY_TARGET if room.humidity_sensor else None
         presets = {
             device: self.presets.get(
-                device, DevicePreset(use=False, temp=room.limits[device]["min"])
+                device,
+                DevicePreset(
+                    use=False,
+                    temp=room.limits[device]["min"],
+                    humidity=humidity if device == DEVICE_VENT else None,
+                ),
             )
             for device in room.devices
             if device != DEVICE_FAN
         }
         fan_presets = {
             fan_slug(eid): self.fan_presets.get(
-                fan_slug(eid), FanPreset(temp=room.limits[DEVICE_FAN]["min"])
+                fan_slug(eid),
+                FanPreset(temp=room.limits[DEVICE_FAN]["min"], humidity=humidity),
             )
             for eid in room.fan_entities
         }

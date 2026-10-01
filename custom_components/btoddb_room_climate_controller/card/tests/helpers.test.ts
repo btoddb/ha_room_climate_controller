@@ -3,11 +3,25 @@ import { describe, it } from "node:test";
 
 import {
   getEffectiveTargetLimits,
+  getHumidityTargetLimits,
   getNumberLimits,
   getTargetTempValue,
   type TargetTempDevice,
 } from "../src/helpers.ts";
 import type { HomeAssistant } from "../src/ha-types.ts";
+
+// Note: `profiles/clipboard.ts` is NOT exercised here. It has a runtime
+// (non-type-only) import of `../helpers` with no extension — fine for the
+// rollup/tsc "bundler" module resolution the build uses, but `node --test`
+// resolves relative ESM specifiers with Node's own loader, which requires an
+// explicit extension and throws ERR_MODULE_NOT_FOUND on that import. Adding
+// the extension (`../helpers.ts`) fixes the test run but makes `npm run
+// build` emit a TS5097 warning ("an import path can only end with a '.ts'
+// extension when 'allowImportingTsExtensions' is enabled"), which requires a
+// tsconfig.json change outside this brief's CARD/src + CARD/tests scope.
+// Clipboard parsing/apply logic is therefore not testable in the existing
+// harness without a build-system change; see the task report for the
+// pre-humidity-payload behavior this would have covered.
 
 function limitsFor(
   device: TargetTempDevice,
@@ -80,6 +94,36 @@ describe("getEffectiveTargetLimits", () => {
     // A sibling target is ignored for fans even when supplied.
     assert.deepEqual(limitsFor("fan", 70, 60, 90, 5), { min: 60, max: 85 });
   });
+
+  it("passes vent limits through unchanged (no offsets, no sibling coupling)", () => {
+    assert.deepEqual(limitsFor("vent", undefined, 60, 86), { min: 60, max: 86 });
+    // A high offset or sibling target would be meaningless for the vent fan
+    // (CC-37: no offsets exist), so both are ignored even if supplied.
+    assert.deepEqual(limitsFor("vent", 70, 60, 86, 10), { min: 60, max: 86 });
+  });
+});
+
+describe("getHumidityTargetLimits", () => {
+  it("passes plain limits through with no offset", () => {
+    assert.deepEqual(getHumidityTargetLimits({ min: 30, max: 90 }), {
+      min: 30,
+      max: 90,
+    });
+  });
+
+  it("clamps max so target + high offset can't exceed 100% (CC-18 mirror)", () => {
+    assert.deepEqual(getHumidityTargetLimits({ min: 30, max: 90 }, 15), {
+      min: 30,
+      max: 85,
+    });
+  });
+
+  it("leaves max untouched when the high offset is missing", () => {
+    assert.deepEqual(getHumidityTargetLimits({ min: 30, max: 90 }, undefined), {
+      min: 30,
+      max: 90,
+    });
+  });
 });
 
 describe("getNumberLimits", () => {
@@ -139,3 +183,4 @@ describe("getTargetTempValue", () => {
     assert.equal(getTargetTempValue(hass, "number.heating_target"), undefined);
   });
 });
+

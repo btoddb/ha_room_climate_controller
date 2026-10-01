@@ -47,15 +47,16 @@ appear.
   `[room=<key>] Humidity changed: <old> → <new>%`
   Also logged on the `…btoddb_room_climate_controller.sensor` logger. Like
   temperature (CC-L1), a humidity change **triggers an evaluation in rooms with
-  at least one standalone fan** — there the engine may command fans per
-  CC-28..CC-30, and any resulting commands appear on their own `RCC commanded`
-  line (CC-L7) with trigger reason `humidity <old>→<new>%`. In a room **without
-  fans** the change is still logged but triggers **no** evaluation, since
-  humidity is inert there (CC-28). No predicted command list is appended.
+  at least one standalone fan or a vent fan** — there the engine may command
+  fans/the vent fan per CC-28..CC-30/CC-36, and any resulting commands appear
+  on their own `RCC commanded` line (CC-L7) with trigger reason
+  `humidity <old>→<new>%`. In a room with **neither** fans nor a vent fan the
+  change is still logged but triggers **no** evaluation, since humidity is
+  inert there (CC-28). No predicted command list is appended.
 
 Logged by `controller.py` in `_on_change`.  The humidity sensor is tracked
-alongside the temperature sensor, and — in rooms with fans — evaluated the same
-way.
+alongside the temperature sensor, and — in rooms with fans or a vent fan —
+evaluated the same way.
 
 ### Profile events (CC-L3)
 
@@ -113,7 +114,7 @@ Logged on the `…btoddb_room_climate_controller.settings` logger.
 - **CC-L5c** When a room is removed:
   `[room=<key>] Room removed: '<label>'`
 
-`<settings>` is the room's full configuration — devices, climate/fan/switch
+`<settings>` is the room's full configuration — devices, climate/fan/switch/vent
 entity ids, temperature/humidity/window sensors, fan-only flags, per-device
 limits, and delays — rendered by the pure `describe_room_settings()` helper in
 `models.py` so created/changed always show the complete picture. Removal logs
@@ -137,8 +138,11 @@ log is emitted for those transitions.
   `[room=office] RCC commanded: A/C → cool, A/C fan speed → high (trigger: temperature 72→73°F; temp 78°F; cooling target 72°F (med 75°F high 78°F))`.
   Each command is rendered as a short device + action phrase (`A/C → cool`,
   `A/C setpoint → 70°F`, `Fan speed → high`, `Fan direction → reverse`,
-  `A/C power on`, etc.) so a customer's log shows *why* a device changed without
-  needing engine internals.
+  `A/C power on`, `Vent fan on`/`Vent fan off`, etc.) so a customer's log shows
+  *why* a device changed without needing engine internals. The vent fan's
+  device label is always `Vent fan` regardless of whether its underlying
+  entity is a `fan.*` or `switch.*` domain (CC-36); it has only on/off
+  phrases, never a speed/direction one.
 
   The `trigger:` reason identifies what caused this evaluation: a temperature
   change (`temperature <old>→<new>°F`), a humidity change
@@ -155,21 +159,30 @@ logger, after the evaluation's commands have all been attempted, using the
 same per-command resolution that sent them — so the logged phrase always
 matches what was actually sent, even when an earlier command in the sequence
 (e.g. a `SetHvacMode`) changed the device's live range for a later one. The
-threshold context lists the room temperature and the target/medium/high
-thresholds for each device type the room actually has — the same data the
-troubleshooting scenarios in issue #14 need (e.g. "does the fan have the right
-thresholds?"). When the room has humidity control (CC-28) and a readable
-humidity reading, the context also carries the room humidity and its
-target/medium/high thresholds in %, e.g.
-`humidity 68% target 60% (med 65% high 70%)`.
+threshold context (`_threshold_context` in `controller.py`) lists the room
+temperature, the cooling/heating target/medium/high thresholds for each
+device type the room actually has, the bare room humidity (`humidity <N>%`)
+when a reading is available, then **per standalone fan**
+(`fan <object_id> target <N>°F (med <N>°F high <N>°F)`), appending that fan's
+own humidity target/offsets (CC-28) when configured —
+` hum target <N>% (med <N>% high <N>%)` — and finally, when the room has a
+vent fan, `vent <object_id> target <N>°F`, appending its own humidity target
+(CC-37) when configured — ` hum target <N>%` (the vent fan has no medium/high
+offsets to show; the `med`/`high` values shown for a fan or the cooling/heating
+devices are always the **absolute** threshold — target plus that offset, not
+the bare offset). Example:
+`temp 78°F; cooling target 72°F (med 75°F high 78°F); humidity 68%; fan office_tower target 76°F (med 79°F high 82°F) hum target 60% (med 65% high 70%); vent bath_vent target 75°F hum target 55%`.
 
 ### Room target/offset edits (CC-L8)
 
 - **CC-L8** When a room's target temperature or medium/high offset number changes:
   `[room=<key>] <name> → <N><unit>`
-  e.g. `[room=office] Cooling target → 72°F`. The room's humidity numbers
-  (CC-28) log the same way with their `%` unit, e.g.
-  `[room=office] Humidity target → 60%`.
+  e.g. `[room=office] Cooling target → 72°F`. Each fan's own humidity target
+  and medium/high offsets (CC-28) log the same way with their `%` unit and the
+  fan's name, e.g. `[room=office] Office Tower humidity target → 60%`; the
+  vent fan's target/humidity-target numbers (CC-37) log as
+  `[room=office] Vent fan target → 65°F` / `[room=office] Vent fan humidity
+  target → 55%`.
 
 Logged by `number.py` in `RoomNumber.async_set_native_value`, at **INFO** on
 the `…btoddb_room_climate_controller.settings` logger, only when the value actually

@@ -14,14 +14,22 @@ from homeassistant.const import STATE_ON
 
 from .const import (
     DEVICE_FAN,
+    DEVICE_VENT,
     KEY_AC_FAN_ONLY,
     KEY_MANUAL_MODE,
     KEY_TARGET,
     KEY_USE,
+    KEY_VENT_HUMIDITY_TARGET,
     LOGGER_PROFILE,
 )
 from .entity import resolve_room_entity
-from .models import fan_reverse_key, fan_slug, fan_target_key, fan_use_key
+from .models import (
+    fan_humidity_target_key,
+    fan_reverse_key,
+    fan_slug,
+    fan_target_key,
+    fan_use_key,
+)
 
 if TYPE_CHECKING:
     from .hub import RoomClimateConfigEntry
@@ -108,6 +116,22 @@ async def async_apply_profile(
                 {"entity_id": target_eid, "value": preset.temp},
                 blocking=True,
             )
+        if (
+            device == DEVICE_VENT
+            and preset.humidity is not None
+            and room.humidity_sensor
+            and (
+                hum_eid := resolve_room_entity(
+                    hass, entry.entry_id, room.key, KEY_VENT_HUMIDITY_TARGET, "number"
+                )
+            )
+        ):
+            await hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": hum_eid, "value": preset.humidity},
+                blocking=True,
+            )
 
     if (
         room.has_ac
@@ -155,6 +179,25 @@ async def _apply_fan_presets(
                 "number",
                 "set_value",
                 {"entity_id": target_eid, "value": fp.temp},
+                blocking=True,
+            )
+        if (
+            fp.humidity is not None
+            and room.humidity_sensor
+            and (
+                hum_eid := resolve_room_entity(
+                    hass,
+                    entry.entry_id,
+                    room.key,
+                    fan_humidity_target_key(slug),
+                    "number",
+                )
+            )
+        ):
+            await hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": hum_eid, "value": fp.humidity},
                 blocking=True,
             )
         if rev_eid := resolve_room_entity(

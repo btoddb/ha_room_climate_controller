@@ -51,8 +51,8 @@ export function resolveRoomConfig(
   const live = (device: string): WsRoomLive => e.live[device] ?? EMPTY_LIVE;
   const cool = live("cooling");
   const heat = live("heating");
+  const vent = live("vent_fan");
   const fanOffsets = e.fan_offsets;
-  const humidity = e.humidity_control;
 
   return defaultConfig({
     type: "custom:room-climate-control",
@@ -76,6 +76,9 @@ export function resolveRoomConfig(
       use: f.use ?? "",
       target: f.target ?? "",
       reverse: f.reverse ?? "",
+      humidity_target: f.humidity_target ?? "",
+      humidity_medium_offset: f.humidity_medium_offset ?? "",
+      humidity_high_offset: f.humidity_high_offset ?? "",
     })),
     use_ac: cool.use ?? "",
     target_cooling: cool.target ?? "",
@@ -87,9 +90,10 @@ export function resolveRoomConfig(
     heating_high_offset: heat.high_offset ?? "",
     fan_medium_offset: fanOffsets?.medium_offset ?? "",
     fan_high_offset: fanOffsets?.high_offset ?? "",
-    humidity_target: humidity?.target ?? "",
-    humidity_medium_offset: humidity?.medium_offset ?? "",
-    humidity_high_offset: humidity?.high_offset ?? "",
+    vent_fan_entity: e.vent_fan_entity ?? "",
+    use_vent_fan: vent.use ?? "",
+    target_vent_fan: vent.target ?? "",
+    vent_humidity_target: vent.humidity_target ?? "",
     // Outdoor + time-range fall back to the integration's hub entities (the
     // outdoor mirror and the graph time-range select) before any hard default.
     outdoor_sensor: user.outdoor_sensor ?? e.outdoor ?? DEFAULT_OUTDOOR_SENSOR,
