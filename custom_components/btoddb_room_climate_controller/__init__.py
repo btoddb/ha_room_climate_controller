@@ -28,6 +28,7 @@ from .constraints import ConstraintsValidator
 from .controller import RoomController
 from .entity import (
     async_assign_areas,
+    async_cleanup_legacy_humidity_entities,
     async_migrate_fan_entity_ids,
     async_migrate_profile_subentries,
     resolve_room_entity,
@@ -178,6 +179,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: RoomClimateConfigEntry) 
     # platforms add their per-fan entities (otherwise the new entities claim the
     # slugged unique_ids first and the rename becomes a no-op).
     async_migrate_fan_entity_ids(hass, entry)
+
+    # CC-28/#77: remove the legacy shared room-level humidity entities before
+    # platform setup creates the new per-device ones, so a freshly created
+    # entity can never be mistaken for a leftover and removed.
+    async_cleanup_legacy_humidity_entities(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

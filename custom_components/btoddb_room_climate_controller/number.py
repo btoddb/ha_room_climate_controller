@@ -18,18 +18,18 @@ from .const import (
     DEFAULT_MEDIUM_OFFSET,
     DEVICE_FAN,
     DEVICE_ICONS,
+    DEVICE_VENT,
     HUMIDITY_OFFSET_MAX,
     HUMIDITY_OFFSET_MIN,
     HUMIDITY_TARGET_MAX,
     HUMIDITY_TARGET_MIN,
     HUMIDITY_UNIT,
     KEY_HIGH_OFFSET,
-    KEY_HUMIDITY_HIGH_OFFSET,
-    KEY_HUMIDITY_MEDIUM_OFFSET,
-    KEY_HUMIDITY_TARGET,
     KEY_MEDIUM_OFFSET,
     KEY_PROFILE_PRESET,
+    KEY_PROFILE_VENT_HUMIDITY,
     KEY_TARGET,
+    KEY_VENT_HUMIDITY_TARGET,
     LOGGER_PROFILE,
     LOGGER_SETTINGS,
     OFFSET_MAX,
@@ -41,8 +41,12 @@ from .entity import ProfileRemovalMixin, profile_device_info, room_device_info
 from .models import (
     Profile,
     Room,
+    fan_humidity_high_key,
+    fan_humidity_medium_key,
+    fan_humidity_target_key,
     fan_slug,
     fan_target_key,
+    profile_fan_humidity_key,
     profile_fan_temp_key,
     profile_uid,
     room_uid,
@@ -104,13 +108,79 @@ def _room_specs(room: Room) -> list[_NumberSpec]:
                     default=DEFAULT_HIGH_OFFSET,
                 )
             )
-            # ...plus a humidity target + its own offsets when the room also
-            # reports humidity (the fan branch already implies has_fan).
+            # ...a per-fan target temp...
+            for eid in room.fan_entities:
+                slug = fan_slug(eid)
+                specs.append(
+                    _NumberSpec(
+                        key=fan_target_key(slug),
+                        name=f"{_fan_label(eid)} target",
+                        icon=DEVICE_ICONS[DEVICE_FAN],
+                        minimum=limits["min"],
+                        maximum=limits["max"],
+                        step=1,
+                        default=limits["min"],
+                    )
+                )
+                # ...plus that fan's own humidity target + offsets (CC-37),
+                # when the room also reports humidity.
+                if room.humidity_sensor:
+                    specs.append(
+                        _NumberSpec(
+                            key=fan_humidity_target_key(slug),
+                            name=f"{_fan_label(eid)} humidity target",
+                            icon="mdi:water-percent",
+                            minimum=HUMIDITY_TARGET_MIN,
+                            maximum=HUMIDITY_TARGET_MAX,
+                            step=1,
+                            default=DEFAULT_HUMIDITY_TARGET,
+                            unit=HUMIDITY_UNIT,
+                        )
+                    )
+                    specs.append(
+                        _NumberSpec(
+                            key=fan_humidity_medium_key(slug),
+                            name=f"{_fan_label(eid)} humidity medium offset",
+                            icon="mdi:fan-speed-2",
+                            minimum=HUMIDITY_OFFSET_MIN,
+                            maximum=HUMIDITY_OFFSET_MAX,
+                            step=1,
+                            default=DEFAULT_HUMIDITY_MEDIUM_OFFSET,
+                            unit=HUMIDITY_UNIT,
+                        )
+                    )
+                    specs.append(
+                        _NumberSpec(
+                            key=fan_humidity_high_key(slug),
+                            name=f"{_fan_label(eid)} humidity high offset",
+                            icon="mdi:fan-speed-3",
+                            minimum=HUMIDITY_OFFSET_MIN,
+                            maximum=HUMIDITY_OFFSET_MAX,
+                            step=1,
+                            default=DEFAULT_HUMIDITY_HIGH_OFFSET,
+                            unit=HUMIDITY_UNIT,
+                        )
+                    )
+            continue
+        if device == DEVICE_VENT:
+            # On/off only (CC-36): target temp + its own humidity target, no
+            # fan-speed offsets.
+            specs.append(
+                _NumberSpec(
+                    key=KEY_TARGET[device],
+                    name="Vent fan target",
+                    icon=DEVICE_ICONS[device],
+                    minimum=limits["min"],
+                    maximum=limits["max"],
+                    step=1,
+                    default=limits["min"],
+                )
+            )
             if room.humidity_sensor:
                 specs.append(
                     _NumberSpec(
-                        key=KEY_HUMIDITY_TARGET,
-                        name="Humidity target",
+                        key=KEY_VENT_HUMIDITY_TARGET,
+                        name="Vent fan humidity target",
                         icon="mdi:water-percent",
                         minimum=HUMIDITY_TARGET_MIN,
                         maximum=HUMIDITY_TARGET_MAX,
@@ -119,43 +189,6 @@ def _room_specs(room: Room) -> list[_NumberSpec]:
                         unit=HUMIDITY_UNIT,
                     )
                 )
-                specs.append(
-                    _NumberSpec(
-                        key=KEY_HUMIDITY_MEDIUM_OFFSET,
-                        name="Humidity medium offset",
-                        icon="mdi:fan-speed-2",
-                        minimum=HUMIDITY_OFFSET_MIN,
-                        maximum=HUMIDITY_OFFSET_MAX,
-                        step=1,
-                        default=DEFAULT_HUMIDITY_MEDIUM_OFFSET,
-                        unit=HUMIDITY_UNIT,
-                    )
-                )
-                specs.append(
-                    _NumberSpec(
-                        key=KEY_HUMIDITY_HIGH_OFFSET,
-                        name="Humidity high offset",
-                        icon="mdi:fan-speed-3",
-                        minimum=HUMIDITY_OFFSET_MIN,
-                        maximum=HUMIDITY_OFFSET_MAX,
-                        step=1,
-                        default=DEFAULT_HUMIDITY_HIGH_OFFSET,
-                        unit=HUMIDITY_UNIT,
-                    )
-                )
-            # ...and a per-fan target temp.
-            specs.extend(
-                _NumberSpec(
-                    key=fan_target_key(fan_slug(eid)),
-                    name=f"{_fan_label(eid)} target",
-                    icon=DEVICE_ICONS[DEVICE_FAN],
-                    minimum=limits["min"],
-                    maximum=limits["max"],
-                    step=1,
-                    default=limits["min"],
-                )
-                for eid in room.fan_entities
-            )
             continue
         specs.append(
             _NumberSpec(
@@ -230,6 +263,13 @@ async def async_setup_entry(
             ProfileFanPresetNumber(entry, profile, room, eid)
             for eid in room.fan_entities
         )
+        if room.humidity_sensor:
+            entities.extend(
+                ProfileFanHumidityNumber(entry, profile, eid)
+                for eid in room.fan_entities
+            )
+            if room.has_vent_fan:
+                entities.append(ProfileVentHumidityNumber(entry, profile))
         if entities:
             async_add_entities(entities, config_subentry_id=room.room_id)
 
@@ -307,7 +347,7 @@ class ProfilePresetNumber(ProfileRemovalMixin, RestoreNumber):
         self._attr_unique_id = profile_uid(
             entry.entry_id, profile.id, KEY_PROFILE_PRESET[device]
         )
-        self._attr_name = f"{device.capitalize()} target"
+        self._attr_name = f"{device.replace('_', ' ').capitalize()} target"
         self._attr_icon = DEVICE_ICONS[device]
         self._attr_native_min_value = limits["min"]
         self._attr_native_max_value = limits["max"]
@@ -428,4 +468,147 @@ class ProfileFanPresetNumber(ProfileRemovalMixin, RestoreNumber):
         preset = profile.ensure_fan_preset(self._slug)
         if preset.temp != self._attr_native_value:
             preset.temp = float(self._attr_native_value)
+            self.hass.async_create_task(hub.async_save())
+
+
+class ProfileFanHumidityNumber(ProfileRemovalMixin, RestoreNumber):
+    """A profile's per-fan preset humidity target (PR-14)."""
+
+    _attr_has_entity_name = True
+    _attr_mode = NumberMode.BOX
+
+    def __init__(
+        self,
+        entry: RoomClimateConfigEntry,
+        profile: Profile,
+        entity_id: str,
+    ) -> None:
+        """Initialize the per-fan humidity preset number."""
+        self._entry = entry
+        self._profile_id = profile.id
+        self._slug = fan_slug(entity_id)
+        self._label = _fan_label(entity_id)
+        self._attr_unique_id = profile_uid(
+            entry.entry_id, profile.id, profile_fan_humidity_key(self._slug)
+        )
+        self._attr_name = f"{self._label} humidity"
+        self._attr_icon = "mdi:water-percent"
+        self._attr_native_min_value = HUMIDITY_TARGET_MIN
+        self._attr_native_max_value = HUMIDITY_TARGET_MAX
+        self._attr_native_step = 1
+        self._attr_native_unit_of_measurement = HUMIDITY_UNIT
+        self._attr_device_info = profile_device_info(entry, profile)
+        self._default = profile.fan_presets.get(self._slug)
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last value, defaulting to the profile's stored preset."""
+        await super().async_added_to_hass()
+        self._connect_profile_removal()
+        data = await self.async_get_last_number_data()
+        if data is not None and data.native_value is not None:
+            self._attr_native_value = data.native_value
+            self._sync_to_store()
+        elif self._default is not None and self._default.humidity is not None:
+            self._attr_native_value = self._default.humidity
+            self._sync_to_store()
+        else:
+            # No restored value and no stored preset humidity: leave unset so an
+            # old profile that never configured humidity stays a true no-op
+            # instead of silently writing DEFAULT_HUMIDITY_TARGET into the store.
+            self._attr_native_value = None
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the preset humidity target and persist to the profile store."""
+        old = self._attr_native_value
+        self._attr_native_value = value
+        self.async_write_ha_state()
+        self._sync_to_store()
+        if old != value:
+            profile = self._entry.runtime_data.get_profile(self._profile_id)
+            if profile is not None:
+                _PROFILE_LOGGER.info(
+                    "[room=%s profile=%s] Profile preset edited: %s humidity → %s%%",
+                    profile.room,
+                    profile.name,
+                    self._label,
+                    int(value),
+                )
+
+    @callback
+    def _sync_to_store(self) -> None:
+        hub = self._entry.runtime_data
+        profile = hub.get_profile(self._profile_id)
+        if profile is None or self._attr_native_value is None:
+            return
+        preset = profile.ensure_fan_preset(self._slug)
+        if preset.humidity != self._attr_native_value:
+            preset.humidity = float(self._attr_native_value)
+            self.hass.async_create_task(hub.async_save())
+
+
+class ProfileVentHumidityNumber(ProfileRemovalMixin, RestoreNumber):
+    """The vent-fan profile preset's humidity target (PR-13)."""
+
+    _attr_has_entity_name = True
+    _attr_mode = NumberMode.BOX
+
+    def __init__(self, entry: RoomClimateConfigEntry, profile: Profile) -> None:
+        """Initialize the vent humidity preset number."""
+        self._entry = entry
+        self._profile_id = profile.id
+        self._attr_unique_id = profile_uid(
+            entry.entry_id, profile.id, KEY_PROFILE_VENT_HUMIDITY
+        )
+        self._attr_name = "Vent fan humidity"
+        self._attr_icon = "mdi:water-percent"
+        self._attr_native_min_value = HUMIDITY_TARGET_MIN
+        self._attr_native_max_value = HUMIDITY_TARGET_MAX
+        self._attr_native_step = 1
+        self._attr_native_unit_of_measurement = HUMIDITY_UNIT
+        self._attr_device_info = profile_device_info(entry, profile)
+        self._default = profile.presets.get(DEVICE_VENT)
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last value, defaulting to the profile's stored preset."""
+        await super().async_added_to_hass()
+        self._connect_profile_removal()
+        data = await self.async_get_last_number_data()
+        if data is not None and data.native_value is not None:
+            self._attr_native_value = data.native_value
+            self._sync_to_store()
+        elif self._default is not None and self._default.humidity is not None:
+            self._attr_native_value = self._default.humidity
+            self._sync_to_store()
+        else:
+            # No restored value and no stored preset humidity: leave unset so an
+            # old profile that never configured humidity stays a true no-op
+            # instead of silently writing DEFAULT_HUMIDITY_TARGET into the store.
+            self._attr_native_value = None
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Update the vent humidity preset and persist to the profile store."""
+        old = self._attr_native_value
+        self._attr_native_value = value
+        self.async_write_ha_state()
+        self._sync_to_store()
+        if old != value:
+            profile = self._entry.runtime_data.get_profile(self._profile_id)
+            if profile is not None:
+                _PROFILE_LOGGER.info(
+                    "[room=%s profile=%s] Profile preset edited: "
+                    "vent fan humidity → %s%%",
+                    profile.room,
+                    profile.name,
+                    int(value),
+                )
+
+    @callback
+    def _sync_to_store(self) -> None:
+        hub = self._entry.runtime_data
+        profile = hub.get_profile(self._profile_id)
+        if profile is None or self._attr_native_value is None:
+            return
+        preset = profile.ensure_preset(DEVICE_VENT)
+        if preset.humidity != self._attr_native_value:
+            preset.humidity = float(self._attr_native_value)
             self.hass.async_create_task(hub.async_save())

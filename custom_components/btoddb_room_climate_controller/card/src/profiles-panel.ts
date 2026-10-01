@@ -1,7 +1,7 @@
 import { LitElement, html, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
-import type { HomeAssistant } from "./ha-types";
+import type { EntityState, HomeAssistant } from "./ha-types";
 import {
   applyClipboardPayload,
   buildClipboardPayload,
@@ -151,11 +151,43 @@ export class RoomClimateProfilesPanel extends LitElement {
     `;
   }
 
+  /** A single preset number input + unit, shared by the temp and humidity
+  columns of a device row. */
+  private _renderPresetNumberInput(
+    entityId: string,
+    obj: EntityState,
+    unit: string
+  ): TemplateResult {
+    const min = Number(obj.attributes.min ?? 0);
+    const max = Number(obj.attributes.max ?? 100);
+    const step = Number(obj.attributes.step ?? 1);
+    const val = parseFloat(obj.state);
+    const display = Number.isNaN(val) ? "" : String(Math.round(val));
+    return html`
+      <div class="profile-temp">
+        <input
+          type="number"
+          class="profile-temp-input"
+          min=${min}
+          max=${max}
+          step=${step}
+          .value=${display}
+          @change=${(ev: Event) => {
+            const n = parseFloat((ev.target as HTMLInputElement).value);
+            if (!Number.isNaN(n)) setInputNumber(this.hass, entityId, n);
+          }}
+        />
+        <span class="profile-temp-unit">${unit}</span>
+      </div>
+    `;
+  }
+
   private _renderDeviceRow(
     label: string,
     useEntityId: string | undefined,
     tempEntityId: string | undefined,
-    extraToggle?: { label: string; entityId?: string }
+    extraToggle?: { label: string; entityId?: string },
+    humidityEntityId?: string
   ): TemplateResult | typeof nothing {
     const tempObj = entityConfigured(tempEntityId)
       ? getStateObj(this.hass, tempEntityId!)
@@ -166,36 +198,18 @@ export class RoomClimateProfilesPanel extends LitElement {
     const extraObj = entityConfigured(extraToggle?.entityId)
       ? getStateObj(this.hass, extraToggle!.entityId!)
       : undefined;
-    if (!tempObj && !useObj && !extraObj) return nothing;
-
-    const min = Number(tempObj?.attributes.min ?? 0);
-    const max = Number(tempObj?.attributes.max ?? 100);
-    const step = Number(tempObj?.attributes.step ?? 1);
-    const val = tempObj ? parseFloat(tempObj.state) : NaN;
-    const display = Number.isNaN(val) ? "" : String(Math.round(val));
+    const humidityObj = entityConfigured(humidityEntityId)
+      ? getStateObj(this.hass, humidityEntityId!)
+      : undefined;
+    if (!tempObj && !useObj && !extraObj && !humidityObj) return nothing;
 
     return html`
       <div class="profile-device-row">
         <span class="profile-device-label">${label}</span>
         <div class="profile-device-temp">
-          ${tempObj
-            ? html`
-                <div class="profile-temp">
-                  <input
-                    type="number"
-                    class="profile-temp-input"
-                    min=${min}
-                    max=${max}
-                    step=${step}
-                    .value=${display}
-                    @change=${(ev: Event) => {
-                      const n = parseFloat((ev.target as HTMLInputElement).value);
-                      if (!Number.isNaN(n)) setInputNumber(this.hass, tempEntityId!, n);
-                    }}
-                  />
-                  <span class="profile-temp-unit">°F</span>
-                </div>
-              `
+          ${tempObj ? this._renderPresetNumberInput(tempEntityId!, tempObj, "°F") : nothing}
+          ${humidityObj
+            ? this._renderPresetNumberInput(humidityEntityId!, humidityObj, "%")
             : nothing}
         </div>
         <div class="profile-device-toggles">
@@ -240,9 +254,19 @@ export class RoomClimateProfilesPanel extends LitElement {
             fan.tempEntity,
             fan.reversible
               ? { label: "Reverse", entityId: fan.reverseEntity }
-              : undefined
+              : undefined,
+            fan.humidityEntity
           )
         )}
+        ${room.vent
+          ? this._renderDeviceRow(
+              "Vent Fan",
+              room.vent.useEntity,
+              room.vent.tempEntity,
+              undefined,
+              room.vent.humidityEntity
+            )
+          : nothing}
       </div>
     `;
   }

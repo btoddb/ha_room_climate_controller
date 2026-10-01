@@ -17,17 +17,16 @@ from .const import (
     DEFAULT_HUMIDITY_MEDIUM_OFFSET,
     DEFAULT_HUMIDITY_TARGET,
     DEVICE_FAN,
+    DEVICE_VENT,
     DOMAIN,
     KEY_AC_FAN_ONLY,
     KEY_HEATER_FAN_ONLY,
     KEY_HIGH_OFFSET,
-    KEY_HUMIDITY_HIGH_OFFSET,
-    KEY_HUMIDITY_MEDIUM_OFFSET,
-    KEY_HUMIDITY_TARGET,
     KEY_MANUAL_MODE,
     KEY_MEDIUM_OFFSET,
     KEY_TARGET,
     KEY_USE,
+    KEY_VENT_HUMIDITY_TARGET,
     LOGGER_CAPABILITIES,
     LOGGER_SENSOR,
 )
@@ -50,6 +49,7 @@ from .engine import (
     SwitchTurnOff,
     SwitchTurnOn,
     TurnOffClimate,
+    VentFanControl,
     any_window_open,
     clamp_setpoint,
     compute_commands,
@@ -62,6 +62,9 @@ from .entity import (
 )
 from .models import (
     Room,
+    fan_humidity_high_key,
+    fan_humidity_medium_key,
+    fan_humidity_target_key,
     fan_reverse_key,
     fan_slug,
     fan_target_key,
@@ -166,6 +169,7 @@ def _device_label(room: Room, entity_id: str) -> str:
         room.heater_fan_entity: "Heater fan",
         room.ac_power_switch: "A/C power",
         room.heater_power_switch: "Heater power",
+        room.vent_fan_entity: "Vent fan",
     }
     for eid in room.fan_entities:
         labels[eid] = f"Fan {eid.split('.')[-1]}"
@@ -213,22 +217,28 @@ def _threshold_context(room: Room, inputs: EngineInputs) -> str:
             f"heating target {int(inputs.target_heating)}°F "
             f"(med {int(inputs.heating_medium)}°F high {int(inputs.heating_high)}°F)"
         )
-    parts.extend(
-        f"fan {fan.info.entity_id.split('.')[-1]} target {int(fan.target)}°F "
-        f"(med {int(fan.medium)}°F high {int(fan.high)}°F)"
-        for fan in inputs.fans
-    )
-    if (
-        inputs.room_humidity is not None
-        and inputs.humidity_target is not None
-        and inputs.humidity_medium is not None
-        and inputs.humidity_high is not None
-    ):
-        parts.append(
-            f"humidity {int(inputs.room_humidity)}% "
-            f"target {int(inputs.humidity_target)}% "
-            f"(med {int(inputs.humidity_medium)}% high {int(inputs.humidity_high)}%)"
+    if inputs.room_humidity is not None:
+        parts.append(f"humidity {int(inputs.room_humidity)}%")
+    for fan in inputs.fans:
+        part = (
+            f"fan {fan.info.entity_id.split('.')[-1]} target {int(fan.target)}°F "
+            f"(med {int(fan.medium)}°F high {int(fan.high)}°F)"
         )
+        if (
+            fan.humidity_target is not None
+            and fan.humidity_medium is not None
+            and fan.humidity_high is not None
+        ):
+            part += (
+                f" hum target {int(fan.humidity_target)}% "
+                f"(med {int(fan.humidity_medium)}% high {int(fan.humidity_high)}%)"
+            )
+        parts.append(part)
+    if (vent := inputs.vent_fan) is not None:
+        part = f"vent {vent.entity_id.split('.')[-1]} target {int(vent.target)}°F"
+        if vent.humidity_target is not None:
+            part += f" hum target {int(vent.humidity_target)}%"
+        parts.append(part)
     return "; ".join(parts)
 
 
@@ -323,6 +333,19 @@ class RoomController:
                     eid,
                     describe_fan_capabilities(self.hass, eid),
                 )
+        # CC-36: a vent fan on the "fan" domain gets the same capability dump
+        # as the other fan entities above; a "switch" domain vent (like the
+        # A/C/heater power switches) has no capability dump to offer.
+        if (
+            room.has_vent_fan
+            and room.vent_fan_entity
+            and room.vent_fan_entity.split(".")[0] == "fan"
+        ):
+            _CAPABILITIES_LOGGER.info(
+                "[room=%s] Vent fan capabilities: %s",
+                room.key,
+                describe_fan_capabilities(self.hass, room.vent_fan_entity),
+            )
 
     # -- subscriptions -------------------------------------------------------
     @callback
@@ -348,7 +371,7 @@ class RoomController:
             ids.add(self.room.humidity_sensor)
         ids.update(self.room.window_sensors)
         for device in self.room.devices:
-            if device == DEVICE_FAN:
+            if device in (DEVICE_FAN, DEVICE_VENT):
                 continue
             for key in (
                 KEY_USE[device],
@@ -360,31 +383,9 @@ class RoomController:
                 if eid := self._resolve(key, domain):
                     ids.add(eid)
         if self.room.has_fan:
-            # The humidity numbers exist only when the room also reports humidity.
-            humidity_keys: tuple[tuple[str, str], ...] = (
-                (
-                    (KEY_HUMIDITY_TARGET, "number"),
-                    (KEY_HUMIDITY_MEDIUM_OFFSET, "number"),
-                    (KEY_HUMIDITY_HIGH_OFFSET, "number"),
-                )
-                if self.room.humidity_sensor
-                else ()
-            )
-            fan_keys: list[tuple[str, str]] = [
-                (KEY_MEDIUM_OFFSET["fan"], "number"),
-                (KEY_HIGH_OFFSET["fan"], "number"),
-                *humidity_keys,
-            ]
-            for fan_eid in self.room.fan_entities:
-                slug = fan_slug(fan_eid)
-                fan_keys += [
-                    (fan_use_key(slug), "switch"),
-                    (fan_target_key(slug), "number"),
-                    (fan_reverse_key(slug), "switch"),
-                ]
-            for key, domain in fan_keys:
-                if eid := self._resolve(key, domain):
-                    ids.add(eid)
+            ids.update(self._fan_tracked_ids())
+        if self.room.has_vent_fan:
+            ids.update(self._vent_tracked_ids())
         for key in (
             KEY_MANUAL_MODE,
             KEY_AC_FAN_ONLY,
@@ -393,6 +394,50 @@ class RoomController:
             if eid := self._resolve(key, "switch"):
                 ids.add(eid)
         return frozenset(ids)
+
+    def _fan_tracked_ids(self) -> set[str]:
+        """Standalone-fan live entities, including per-fan humidity (CC-37)."""
+        fan_keys: list[tuple[str, str]] = [
+            (KEY_MEDIUM_OFFSET["fan"], "number"),
+            (KEY_HIGH_OFFSET["fan"], "number"),
+        ]
+        for fan_eid in self.room.fan_entities:
+            slug = fan_slug(fan_eid)
+            fan_keys += [
+                (fan_use_key(slug), "switch"),
+                (fan_target_key(slug), "number"),
+                (fan_reverse_key(slug), "switch"),
+            ]
+            # The humidity numbers exist only when the room also reports
+            # humidity (per-fan, CC-37).
+            if self.room.humidity_sensor:
+                fan_keys += [
+                    (fan_humidity_target_key(slug), "number"),
+                    (fan_humidity_medium_key(slug), "number"),
+                    (fan_humidity_high_key(slug), "number"),
+                ]
+        return {eid for key, domain in fan_keys if (eid := self._resolve(key, domain))}
+
+    def _vent_tracked_ids(self) -> set[str]:
+        """
+        Vent-fan live entities (CC-36/CC-37).
+
+        The physical vent entity itself is deliberately not tracked, matching
+        the fan/climate pattern: tracking it would make a manual wall-switch
+        toggle trigger an instant evaluation that flips it right back. It's
+        corrected on the next natural evaluation instead.
+        """
+        ids: set[str] = set()
+        vent_keys: list[tuple[str, str]] = [
+            (KEY_USE[DEVICE_VENT], "switch"),
+            (KEY_TARGET[DEVICE_VENT], "number"),
+        ]
+        if self.room.humidity_sensor:
+            vent_keys.append((KEY_VENT_HUMIDITY_TARGET, "number"))
+        ids.update(
+            eid for key, domain in vent_keys if (eid := self._resolve(key, domain))
+        )
+        return ids
 
     @callback
     def _on_change(self, event: Event[EventStateChangedData]) -> None:
@@ -421,10 +466,10 @@ class RoomController:
                     new_val,
                 )
                 trigger = f"humidity {old_val}→{new_val}%"
-            if not self.room.has_fan:
-                # Humidity is inert without fans (CC-28): the evaluation could
-                # not change anything, and requesting one would cancel a run
-                # already in flight.
+            if not (self.room.has_fan or self.room.has_vent_fan):
+                # Humidity is inert without fans or a vent fan (CC-28/CC-36):
+                # the evaluation could not change anything, and requesting one
+                # would cancel a run already in flight.
                 return
         elif changed and entity_id in self.room.window_sensors:
             state_label = "opened" if new_val == "on" else "closed"
@@ -587,6 +632,13 @@ class RoomController:
 
         fan_med = self._number(KEY_MEDIUM_OFFSET["fan"], 3.0)
         fan_high = self._number(KEY_HIGH_OFFSET["fan"], 6.0)
+        # Room humidity reading, shared by every humidity-triggered device
+        # (CC-28/CC-36); each fan/vent below resolves its own target/offsets
+        # against it.
+        room_humidity = None
+        if room.humidity_sensor and (room.has_fan or room.has_vent_fan):
+            room_humidity = self._humidity()
+
         fans: list[FanControl] = []
         for eid in room.fan_entities:
             info = self._fan_info(eid)
@@ -594,6 +646,22 @@ class RoomController:
                 continue  # physical fan not available yet; controlled when it returns
             slug = fan_slug(eid)
             target = self._number(fan_target_key(slug), 72.0)
+            # Per-fan humidity trigger (CC-37): each fan has its own target +
+            # offsets, resolved into absolute %RH thresholds here, matching how
+            # the temperature tiers are passed. Only present when the room
+            # reports humidity at all.
+            h_target = h_medium = h_high = None
+            if room.humidity_sensor:
+                h_target = self._number(
+                    fan_humidity_target_key(slug), float(DEFAULT_HUMIDITY_TARGET)
+                )
+                h_medium = h_target + self._number(
+                    fan_humidity_medium_key(slug),
+                    float(DEFAULT_HUMIDITY_MEDIUM_OFFSET),
+                )
+                h_high = h_target + self._number(
+                    fan_humidity_high_key(slug), float(DEFAULT_HUMIDITY_HIGH_OFFSET)
+                )
             fans.append(
                 FanControl(
                     info=info,
@@ -602,25 +670,13 @@ class RoomController:
                     medium=target + fan_med,
                     high=target + fan_high,
                     reverse=self._switch_state(fan_reverse_key(slug), default=False),
+                    humidity_target=h_target,
+                    humidity_medium=h_medium,
+                    humidity_high=h_high,
                 )
             )
 
-        # Humidity fan trigger: only meaningful when the room has both a
-        # humidity sensor and a fan. Offsets are resolved into absolute %RH
-        # thresholds here, matching how the temperature tiers are passed.
-        room_humidity = humidity_target = humidity_medium = humidity_high = None
-        if room.has_fan and room.humidity_sensor:
-            room_humidity = self._humidity()
-            if room_humidity is not None:
-                humidity_target = self._number(
-                    KEY_HUMIDITY_TARGET, float(DEFAULT_HUMIDITY_TARGET)
-                )
-                humidity_medium = humidity_target + self._number(
-                    KEY_HUMIDITY_MEDIUM_OFFSET, float(DEFAULT_HUMIDITY_MEDIUM_OFFSET)
-                )
-                humidity_high = humidity_target + self._number(
-                    KEY_HUMIDITY_HIGH_OFFSET, float(DEFAULT_HUMIDITY_HIGH_OFFSET)
-                )
+        vent_fan = self._vent_fan_control(room)
 
         return EngineInputs(
             combined=room.combined,
@@ -654,9 +710,36 @@ class RoomController:
             power_on_delay_ms=int(room.power_on_delay * 1000),
             window_open=self._window_open(),
             room_humidity=room_humidity,
+            vent_fan=vent_fan,
+        )
+
+    def _vent_fan_control(self, room: Room) -> VentFanControl | None:
+        """
+        Build the room's vent-fan control, or None when unavailable (CC-31).
+
+        Mirrors the standalone-fan pattern (``info is None: continue``): a
+        configured but not-yet-available vent entity is simply skipped for
+        this evaluation rather than commanded against stale/default state.
+        """
+        if not (room.has_vent_fan and room.vent_fan_entity):
+            return None
+        state = self.hass.states.get(room.vent_fan_entity)
+        if state is None or state.state in _INVALID:
+            return None
+        humidity_target = None
+        if room.humidity_sensor:
+            humidity_target = self._number(
+                KEY_VENT_HUMIDITY_TARGET, float(DEFAULT_HUMIDITY_TARGET)
+            )
+        return VentFanControl(
+            entity_id=room.vent_fan_entity,
+            domain=room.vent_fan_entity.split(".")[0],
+            is_on=state.state == STATE_ON,
+            use=self._switch_state(KEY_USE[DEVICE_VENT], default=False),
+            target=self._number(
+                KEY_TARGET[DEVICE_VENT], float(room.limits[DEVICE_VENT]["min"])
+            ),
             humidity_target=humidity_target,
-            humidity_medium=humidity_medium,
-            humidity_high=humidity_high,
         )
 
     # -- state readers -------------------------------------------------------

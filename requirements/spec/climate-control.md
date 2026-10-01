@@ -10,11 +10,11 @@ gating is the controller's job — the engine assumes control is active.
 
 ## Devices & wiring
 
-A room has up to three **device types**, in canonical order: **cooling** (A/C),
-**heating** (heater), **fan** (standalone). A room only has the devices it's
-configured with; absent devices are ignored in all rules, entities, and the card.
-A room may also have optional **window sensors** that suppress conditioning
-while any is open (CC-20).
+A room has up to four **device types**, in canonical order: **cooling** (A/C),
+**heating** (heater), **fan** (standalone), **vent fan** (CC-36). A room only has
+the devices it's configured with; absent devices are ignored in all rules,
+entities, and the card. A room may also have optional **window sensors** that
+suppress conditioning while any is open (CC-20).
 
 - **CC-1** Each device type has an independent **Use** toggle. Use on → the engine may drive that device. Use off → the device is turned off unless another rule supersedes it (see fan-only override).
 - **CC-2** A **combined** room wires one `climate` entity to *both* cooling and heating (a heat pump). It's modeled by `combined=True` with `ac_climate == heater_climate`; the engine runs the combined branch instead of separate A/C + heater branches.
@@ -28,14 +28,14 @@ reads and the card/profiles write. A room may have **multiple standalone fans**
 (`fan_entities`, a list); each fan's live entities are keyed by a **slug of the
 fan's source entity id**, so per-fan keys take the form `…__<slug>`.
 
-- **Target temp** — `number.*` (`target_cooling_temp` / `target_heating_temp`; per fan, `target_fan_temp__<slug>`).
-- **Medium offset** and **High offset** — `number.*`, range **1–20 °F** (`OFFSET_MIN`/`OFFSET_MAX`). They define the fan-speed thresholds (CC-7). A room's fans **share a single** Medium/High offset pair (`fan_medium_offset` / `fan_high_offset`), not one pair per fan.
-- **Use** toggle — `switch.*` (`use_ac` / `use_heater`; per fan, `use_fan__<slug>`).
+- **Target temp** — `number.*` (`target_cooling_temp` / `target_heating_temp`; per fan, `target_fan_temp__<slug>`; vent fan, `target_vent_fan_temp`).
+- **Medium offset** and **High offset** — `number.*`, range **1–20 °F** (`OFFSET_MIN`/`OFFSET_MAX`). They define the fan-speed thresholds (CC-7). A room's fans **share a single** Medium/High offset pair (`fan_medium_offset` / `fan_high_offset`), not one pair per fan. The vent fan has no speed tiers, so it has no offset entities (CC-36/CC-37).
+- **Use** toggle — `switch.*` (`use_ac` / `use_heater`; per fan, `use_fan__<slug>`; vent fan, `use_vent_fan`).
 - **Manual mode** — one `switch.*` per room (`manual_mode`).
 - **Fan-only override** — `switch.*` per applicable device (see CC-12).
-- **Fan reverse** — `switch.*` per fan (`fan_reverse__<slug>`; see CC-22).
-- **Humidity target** — one `number.*` per room (`humidity_target`), range **30–90 %**, default **60**. Created **only** when the room has a humidity sensor **and** at least one standalone fan (CC-28).
-- **Humidity medium offset** and **Humidity high offset** — `number.*`, range **1–30 %** (`humidity_medium_offset` / `humidity_high_offset`, defaults 5/10), shared by all of the room's fans. Same creation condition as the humidity target (CC-28); they define the humidity speed thresholds.
+- **Fan reverse** — `switch.*` per fan (`fan_reverse__<slug>`; see CC-22). The vent fan has no reverse control (on/off only).
+- **Humidity target** — `number.*` **per humidity-triggered device**, range **30–90 %**, default **60**: per standalone fan (`fan_humidity_target__<slug>`), and for the vent fan (`vent_fan_humidity_target`). Created **only** when the room has a humidity sensor (and, for a fan's own target, that fan is configured) — CC-28/CC-37.
+- **Humidity medium offset** and **Humidity high offset** — `number.*` **per standalone fan**, range **1–30 %** (`fan_humidity_medium_offset__<slug>` / `fan_humidity_high_offset__<slug>`, defaults 5/10). Same creation condition as that fan's humidity target (CC-28); they define that fan's humidity speed thresholds. The vent fan has no speed tiers, so it has no humidity offset entities (CC-37).
 
 ## Temperature comparison
 
@@ -95,8 +95,8 @@ and its **own** Fan reverse switch, but all of a room's fans **share** the room'
 fan Medium/High **offsets** and the fan min/max **limits**. Fans are
 **independent** — one may run while another is off. A standalone fan has **two**
 triggers: the room's **temperature** and — when the room has a humidity sensor —
-the room's **humidity** (CC-28..CC-31); the humidity target/offsets are shared by
-all of the room's fans.
+**that fan's own humidity target and offsets** (CC-28..CC-31) — each fan's
+humidity settings are independent of every other fan's.
 
 Cooling and heating remain **single-device** this round (out of scope). For
 backward compatibility, a pre-existing single-fan room (config key `fan_entity`
@@ -104,20 +104,30 @@ and un-slugged `target_fan_temp` / `use_fan` / `fan_reverse` entities) is
 **migrated** to the list form — its legacy entities are renamed to the slugged
 per-fan keys.
 
-- **CC-13** Each fan runs when **its own Use fan** toggle is on **and** the room is past that fan's temperature threshold (CC-27 cooling-style hysteresis against that fan's `target_fan`) **or the room's humidity threshold (CC-28/CC-29)**; otherwise that fan is turned off. Every fan is evaluated independently against its own target and its own Use.
-- **CC-14** While on, a fan's speed follows the cooling-style tiers (CC-7) against **its own** `target_fan` plus the room's **shared** fan offsets, mapped to 10/50/100% or the fan's preset modes. Because the offsets are shared, each fan's Medium/High thresholds are its own target plus the common offsets. When the humidity trigger is active the commanded speed is the **faster** of this tier and the humidity tier (CC-29).
+- **CC-13** Each fan runs when **its own Use fan** toggle is on **and** the room is past that fan's temperature threshold (CC-27 cooling-style hysteresis against that fan's `target_fan`) **or past that fan's own humidity threshold (CC-28/CC-29)**; otherwise that fan is turned off. Every fan is evaluated independently against its own target, its own humidity target, and its own Use.
+- **CC-14** While on, a fan's speed follows the cooling-style tiers (CC-7) against **its own** `target_fan` plus the room's **shared** fan offsets, mapped to 10/50/100% or the fan's preset modes. Because the offsets are shared, each fan's Medium/High thresholds are its own target plus the common offsets. When that fan's own humidity trigger is active the commanded speed is the **faster** of this tier and that fan's humidity tier (CC-29).
 
-## Humidity trigger (standalone fans)
+## Humidity trigger (standalone fans + vent fan)
 
-A room with a humidity sensor can also run its standalone fans to move damp air.
-Humidity is a **fan-only** concern — it never drives cooling or heating.
+A room with a humidity sensor can also run its standalone fans — and its vent fan
+(CC-36) — to move damp air. Humidity is a **fan-only** concern — it never drives
+cooling or heating.
 
-- **CC-28** A room with a **humidity sensor** and at least one **standalone fan** gets one room-level **Humidity target** `number` (unit %, range 30–90, default 60) and one shared **Humidity medium/high offset** pair (unit %, range 1–30, defaults 5/10). Humidity thresholds derive as in CC-7 (cooling-style): `medium = target + medium_offset`, `high = target + high_offset`, and the tier comparisons **truncate to whole %** per the CC-5 convention. Humidity affects **standalone fans only** — cooling/heating decisions (CC-9..CC-11) and companion fans remain temperature-only. Rooms without a humidity sensor, or without fans, get no humidity entities and behave exactly as before.
-- **CC-29** Temperature and humidity are **independent triggers** for each standalone fan, combined so they cooperate: a fan (with its Use on) runs when **either** the temperature trigger (CC-13/CC-27) **or** the humidity trigger (CC-30) wants it on, and turns off **only when both decline**. While running, speed is the **faster** of the temperature tier (CC-14) and the humidity tier (room humidity against the CC-28 thresholds).
-- **CC-30** The humidity on/off decision uses an **asymmetric hysteresis deadband** analogous to CC-27, keyed on the fan's reported on/off state (humidity target `H`): once running, keep running while `humidity > H + 0.5`; once stopped, do not restart until `humidity >= H + 2.0`. The wider band (vs. temperature's 0.2/1.0) absorbs %RH sensor noise; the constants are fixed, not configurable.
+- **CC-28** A room with a **humidity sensor** gets, **per standalone fan**, its own **Humidity target** `number` (unit %, range 30–90, default 60) and its own **Humidity medium/high offset** pair (unit %, range 1–30, defaults 5/10); the vent fan (when configured) gets only its own **Humidity target** `number` (same range/default), with no offsets — see CC-37. Humidity thresholds derive as in CC-7 (cooling-style): `medium = target + medium_offset`, `high = target + high_offset`, and the tier comparisons **truncate to whole %** per the CC-5 convention. Humidity affects **standalone fans and the vent fan only** — cooling/heating decisions (CC-9..CC-11) and companion fans remain temperature-only. Rooms without a humidity sensor get no humidity entities and behave exactly as before. **Note:** the former shared room-level humidity target/offset entities (one set per room, pre-#77) are **removed** from the entity registry on upgrade (clean cutover, no value migration) — every fan's and the vent fan's new per-device entities start at the defaults above, so existing humidity customizations reset.
+- **CC-29** Temperature and humidity are **independent triggers** for each standalone fan, combined so they cooperate: a fan (with its Use on) runs when **either** the temperature trigger (CC-13/CC-27) **or** that fan's own humidity trigger (CC-30) wants it on, and turns off **only when both decline**. While running, speed is the **faster** of the temperature tier (CC-14) and that fan's own humidity tier (room humidity against that fan's CC-28 thresholds). The vent fan participates **on/off only** — it has no speed ladder (CC-36).
+- **CC-30** The humidity on/off decision uses an **asymmetric hysteresis deadband** analogous to CC-27, keyed on the device's reported on/off state (humidity target `H`): once running, keep running while `humidity > H + 0.5`; once stopped, do not restart until `humidity >= H + 2.0`. The wider band (vs. temperature's 0.2/1.0) absorbs %RH sensor noise; the constants are fixed, not configurable. Each device (fan or vent fan) is evaluated against **its own** humidity target — a two-fan room's fans behave independently of one another.
 
-  Because both triggers share the fan's single on/off state, a fan started by one trigger holds the *other* trigger in its keep-running band too — the fan stops only when temperature is within 0.2 °F of its target (or below) **and** humidity is within 0.5 % of its target (or below). This can only lengthen a run, never cause cycling: any restart still requires a full CC-27/CC-30 restart-threshold crossing.
-- **CC-31** Fail-safe: a missing or unreadable humidity reading disables the humidity trigger (temperature-only behavior, CC-13) — it never suppresses or forces conditioning. An unreadable **temperature** still skips the room's evaluation entirely (existing behavior), so humidity alone never drives control; a working temperature sensor is a prerequisite (documented limitation).
+  Because both triggers share a device's single on/off state, a device started by one trigger holds the *other* trigger in its keep-running band too — it stops only when temperature is within 0.2 °F of its target (or below) **and** humidity is within 0.5 % of its own target (or below). This can only lengthen a run, never cause cycling: any restart still requires a full CC-27/CC-30 restart-threshold crossing.
+- **CC-31** Fail-safe: a missing or unreadable humidity reading disables the humidity trigger for every device (temperature-only behavior, CC-13/CC-36) — it never suppresses or forces conditioning. An unreadable **temperature** still skips the room's evaluation entirely (existing behavior), so humidity alone never drives control; a working temperature sensor is a prerequisite (documented limitation).
+
+## Vent fan control
+
+A room may have **exactly one** vent fan: a single on/off **`switch` or `fan`**
+entity (no speed tiers, no direction) — e.g. a bathroom exhaust fan behind a smart
+switch. It is a distinct device type (`vent_fan`) from the standalone fans above.
+
+- **CC-36** With its own **Use** toggle on, the vent fan runs when the room is past its own **temperature** target (CC-27 cooling-style hysteresis against the vent fan's own reported on/off state) **or** past its own **humidity** target (CC-30 hysteresis); it turns off only when both decline. Commands are idempotent (CC-19): a command is emitted only on an actual on/off state change. An open window **never** suppresses it — CC-20's suppression covers active Cool/Heat only, not the vent fan. A missing or unreadable humidity reading degrades it to temperature-only (CC-31's fail-safe). An unavailable vent-fan entity is skipped (no commands, no crash).
+- **CC-37** The vent fan's live entities: a `use_vent_fan` **Use** switch (default off), a `target_vent_fan_temp` **number** (°F, the room's per-device vent-fan min/max limits, default at the minimum), and — only when the room has a humidity sensor — a `vent_fan_humidity_target` **number** (%, range 30–90, default 60). It has **no** medium/high offset entities of its own (on/off only, no speed ladder). On/off commands are sent via the entity's **own domain** — `fan.turn_on`/`fan.turn_off` for a `fan.*` entity, `switch.turn_on`/`switch.turn_off` for a `switch.*` entity.
 
 ## Standalone fan direction
 
@@ -148,7 +158,7 @@ design.
 A room may configure zero or more optional **window** `binary_sensor`s
 (`window_sensors`). They only affect their own room's conditioning.
 
-- **CC-20** A room counts as **window open** when **any** of its window sensors reads `on`. While open, the engine suppresses the **Cool** and **Heat** decisions — a device actively cooling/heating is turned off via the normal OFF path. **Fan-only is not suppressed**: the standalone fan (CC-13), a fan-capable heater's native fan-only, and the fan-only overrides (CC-12) still run, because they circulate air without spending heating/cooling energy. Profile applies still write uses/targets (see `profiles.md`); suppression is enforced at evaluation, so closing every window re-evaluates each device against the current targets with no re-apply. Manual mode (CC-15) still gates first — an open window never overrides a manually driven device.
+- **CC-20** A room counts as **window open** when **any** of its window sensors reads `on`. While open, the engine suppresses the **Cool** and **Heat** decisions — a device actively cooling/heating is turned off via the normal OFF path. **Fan-only is not suppressed**: the standalone fan (CC-13), the vent fan (CC-36), a fan-capable heater's native fan-only, and the fan-only overrides (CC-12) still run, because they circulate air without spending heating/cooling energy. Profile applies still write uses/targets (see `profiles.md`); suppression is enforced at evaluation, so closing every window re-evaluates each device against the current targets with no re-apply. Manual mode (CC-15) still gates first — an open window never overrides a manually driven device.
 - **CC-21** Fail-safe: a window sensor reading `unavailable`/`unknown` is treated as **closed**, per sensor. A room with all sensors closed (or none configured) behaves exactly as a room with no window sensor — conditioning is never suppressed on bad/missing data.
 
 ## Constraints (advisory clamping)
@@ -158,9 +168,9 @@ watches a room's target/offset numbers; on an invalid combination it **clamps**
 the offending value and raises a **persistent notification** (HA notifications
 tab) — non-blocking, no deprecated notify methods.
 
-- **CC-16** High offset > medium offset (per device, and likewise for the room's **humidity** medium/high offsets — CC-28).
+- **CC-16** High offset > medium offset (per device, and likewise **per standalone fan** for that fan's own **humidity** medium/high offsets — CC-28). The vent fan has no offsets, so this rule doesn't apply to it.
 - **CC-17** **Heating target must stay below cooling target** (when the room has both).
-- **CC-18** A device's `target ± high_offset` must stay within that device's configured min/max limits; the high offset is clamped to fit. The same rule applies to humidity: `humidity_target + humidity_high_offset` must stay **≤ 100 %**, and the humidity high offset is clamped to fit.
+- **CC-18** A device's `target ± high_offset` must stay within that device's configured min/max limits; the high offset is clamped to fit. The same rule applies to humidity, **per standalone fan**: that fan's `humidity_target + humidity_high_offset` must stay **≤ 100 %**, and that fan's humidity high offset is clamped to fit. The vent fan is **exempt** — its humidity target tops out at 90% (CC-37) and it has no offset to clamp.
 - The validator ignores the echo of its own clamp writes so two rules can't ping-pong a value.
 
 ## Command timing

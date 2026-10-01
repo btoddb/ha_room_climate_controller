@@ -19,20 +19,20 @@ export interface DeviceSettingsFields {
   reverseToggle?: string;
 }
 
-/** The room's fan settings: one target (+ reverse when reversible) per fan, plus
-the single medium/high offset pair shared across all the room's fans. */
+/** The room's fan settings: one target (+ reverse when reversible, + its own
+humidity target/offsets when the room has a humidity sensor) per fan, plus the
+single medium/high speed-offset pair shared across all the room's fans. */
 export interface FanSettingsFields {
   fans: FanConfig[];
   mediumOffset: string;
   highOffset: string;
 }
 
-/** The room's humidity target + shared medium/high offsets (CC-28); they drive
-the room's fans, so the section renders after the Fan section (UX-31). */
-export interface HumiditySettingsFields {
+/** The room's Vent Fan settings (issue #77, UX-34): temp target + humidity
+target (when the room has a humidity sensor). No offsets (CC-37). */
+export interface VentSettingsFields {
   target: string;
-  mediumOffset: string;
-  highOffset: string;
+  humidityTarget: string;
 }
 
 function parseNum(hass: HomeAssistant, entityId: string, fallback = 0): number {
@@ -92,22 +92,14 @@ export function buildFanSettingsFields(
   };
 }
 
-/** Humidity settings, or null when the room has no humidity control — the
-integration only creates all three entities together (CC-28). */
-export function buildHumiditySettingsFields(
+/** Vent Fan settings, or null when the room has no vent fan (issue #77). */
+export function buildVentSettingsFields(
   config: RoomClimateControlConfig
-): HumiditySettingsFields | null {
-  if (
-    !entityConfigured(config.humidity_target) ||
-    !entityConfigured(config.humidity_medium_offset) ||
-    !entityConfigured(config.humidity_high_offset)
-  ) {
-    return null;
-  }
+): VentSettingsFields | null {
+  if (!entityConfigured(config.vent_fan_entity)) return null;
   return {
-    target: config.humidity_target,
-    mediumOffset: config.humidity_medium_offset,
-    highOffset: config.humidity_high_offset,
+    target: config.target_vent_fan,
+    humidityTarget: config.vent_humidity_target,
   };
 }
 
@@ -235,13 +227,53 @@ export function renderDeviceSettingsSection(
   `;
 }
 
+/** This fan's own humidity target + medium/high offset rows (CC-28 amendment:
+every humidity-triggered device owns its own target and offsets, so unlike the
+shared speed offsets above, a "→ N%" preview is always unambiguous per fan). */
+function renderFanHumiditySettings(
+  hass: HomeAssistant,
+  fan: FanConfig
+): TemplateResult {
+  const medComputed = computedThreshold(
+    hass,
+    fan.humidity_target,
+    fan.humidity_medium_offset,
+    false
+  );
+  const highComputed = computedThreshold(
+    hass,
+    fan.humidity_target,
+    fan.humidity_high_offset,
+    false
+  );
+
+  return html`
+    ${renderTargetRow(hass, fan.humidity_target, `${fan.label} humidity`, "%")}
+    ${renderOffsetSlider(
+      hass,
+      fan.humidity_medium_offset,
+      `${fan.label} humidity medium offset`,
+      medComputed,
+      "%"
+    )}
+    ${renderOffsetSlider(
+      hass,
+      fan.humidity_high_offset,
+      `${fan.label} humidity high offset`,
+      highComputed,
+      "%"
+    )}
+  `;
+}
+
 export function renderFanSettingsSection(
   hass: HomeAssistant,
   fields: FanSettingsFields
 ): TemplateResult {
-  // The medium/high offsets are shared, so a single "→ X°F" preview is only
-  // unambiguous with exactly one fan; with several fans (different targets) we
-  // drop the preview rather than pick one fan's threshold arbitrarily.
+  // The medium/high speed offsets are shared, so a single "→ X°F" preview is
+  // only unambiguous with exactly one fan; with several fans (different
+  // targets) we drop the preview rather than pick one fan's threshold
+  // arbitrarily.
   const soleTarget = fields.fans.length === 1 ? fields.fans[0].target : undefined;
   const medComputed = soleTarget
     ? computedThreshold(hass, soleTarget, fields.mediumOffset, false)
@@ -265,6 +297,9 @@ export function renderFanSettingsSection(
                 multipleFans ? `${fan.label} reverse` : "Reverse"
               )
             : nothing}
+          ${entityConfigured(fan.humidity_target)
+            ? renderFanHumiditySettings(hass, fan)
+            : nothing}
         `
       )}
       ${renderOffsetSlider(hass, fields.mediumOffset, "Medium offset", medComputed)}
@@ -273,20 +308,17 @@ export function renderFanSettingsSection(
   `;
 }
 
-export function renderHumiditySettingsSection(
+export function renderVentSettingsSection(
   hass: HomeAssistant,
-  fields: HumiditySettingsFields
+  fields: VentSettingsFields
 ): TemplateResult {
-  // Humidity offsets add to the target (damper ⇒ faster), like cooling.
-  const medComputed = computedThreshold(hass, fields.target, fields.mediumOffset, false);
-  const highComputed = computedThreshold(hass, fields.target, fields.highOffset, false);
-
   return html`
     <div class="settings-section">
-      <div class="settings-section-title">Humidity</div>
-      ${renderTargetRow(hass, fields.target, "Target", "%")}
-      ${renderOffsetSlider(hass, fields.mediumOffset, "Medium offset", medComputed, "%")}
-      ${renderOffsetSlider(hass, fields.highOffset, "High offset", highComputed, "%")}
+      <div class="settings-section-title">Vent Fan</div>
+      ${renderTargetRow(hass, fields.target, "Target")}
+      ${entityConfigured(fields.humidityTarget)
+        ? renderTargetRow(hass, fields.humidityTarget, "Humidity target", "%")
+        : nothing}
     </div>
   `;
 }

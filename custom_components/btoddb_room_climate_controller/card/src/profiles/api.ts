@@ -6,6 +6,10 @@ export interface WsPresetDevice {
   temp: number | null;
   use_entity: string | null;
   temp_entity: string | null;
+  /** Present on the "vent_fan" preset (humidity-triggered device); absent on
+  cooling/heating presets. */
+  humidity?: number | null;
+  humidity_entity?: string | null;
 }
 
 /** One fan's full per-profile preset (use + temp + reverse), resolved to the
@@ -20,6 +24,10 @@ export interface WsFanPreset {
   use_entity: string | null;
   temp_entity: string | null;
   reverse_entity: string | null;
+  /** This fan's own humidity target preset (CC-28 amendment: per-fan, not
+  shared); null when the room has no humidity sensor. */
+  humidity: number | null;
+  humidity_entity: string | null;
 }
 
 export interface WsProfile {
@@ -46,10 +54,15 @@ export interface WsRoomLive {
   target: string | null;
   medium_offset: string | null;
   high_offset: string | null;
+  /** Only present on the "vent_fan" live entry; null when the room has no
+  humidity sensor. */
+  humidity_target?: string | null;
 }
 
 /** One fan's live room entities. Each fan owns its Use switch, Target number and
-Reverse switch; `reversible` is detected per fan (CC-22). */
+Reverse switch; `reversible` is detected per fan (CC-22). Each fan also owns its
+own humidity target + medium/high offsets (CC-28 amendment); null without a
+humidity sensor. */
 export interface WsFanEntity {
   entity_id: string;
   slug: string;
@@ -58,18 +71,13 @@ export interface WsFanEntity {
   use: string | null;
   target: string | null;
   reverse: string | null;
+  humidity_target: string | null;
+  humidity_medium_offset: string | null;
+  humidity_high_offset: string | null;
 }
 
 /** Shared fan-speed offset number entities — one pair per room, not per fan. */
 export interface WsFanOffsets {
-  medium_offset: string | null;
-  high_offset: string | null;
-}
-
-/** Room-level humidity target + shared medium/high offsets driving the room's
-fans (CC-28); null unless the room has a humidity sensor and a fan. */
-export interface WsHumidityControl {
-  target: string | null;
   medium_offset: string | null;
   high_offset: string | null;
 }
@@ -81,6 +89,8 @@ export interface WsRoom {
   has_ac: boolean;
   has_heating: boolean;
   has_fan: boolean;
+  /** Whether the room has a single on/off vent fan device (issue #77, CC-36). */
+  has_vent_fan: boolean;
   combined: boolean;
   entities: {
     manual_mode: string | null;
@@ -97,10 +107,10 @@ export interface WsRoom {
     fans: WsFanEntity[];
     /** Shared medium/high offsets for the room's fans, or null when no fan. */
     fan_offsets: WsFanOffsets | null;
-    /** Humidity target/offsets, or null when the room has no humidity control. */
-    humidity_control: WsHumidityControl | null;
+    /** The room's vent fan switch/fan entity, or null when absent. */
+    vent_fan_entity: string | null;
     window_sensors: string[];
-    /** Only "cooling"/"heating" now — the "fan" key moved to `fans`. */
+    /** "cooling"/"heating"/"vent_fan" — the "fan" key moved to `fans`. */
     live: Record<string, WsRoomLive>;
   };
 }

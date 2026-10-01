@@ -9,10 +9,10 @@ import {
 import {
   buildDeviceSettingsFields,
   buildFanSettingsFields,
-  buildHumiditySettingsFields,
   renderDeviceSettingsSection,
   renderFanSettingsSection,
-  renderHumiditySettingsSection,
+  renderVentSettingsSection,
+  buildVentSettingsFields,
   renderRoomSettingsSection,
 } from "./settings-ui";
 import { GraphOverlay } from "./graph-overlay";
@@ -26,8 +26,10 @@ import {
   formatSensorValue,
   getEffectiveTargetLimits,
   getFanMode,
+  getHumidityTargetLimits,
   getHvacMode,
   getNumberLimits,
+  getOnOffMode,
   getStateObj,
   getTargetTemp,
   getTargetTempValue,
@@ -231,18 +233,76 @@ export class RoomClimateControl extends LitElement {
     // Open window suppresses cooling/heating (CC-20); the Use toggles for those
     // devices are disabled while open (UX-26). Fan-only override stays live.
     const winOpen = windowOpen(this.hass, c.window_sensors);
+    // The humidity column (and its spacers) only render when at least one row
+    // actually has a configured humidity target (UX-2/UX-30/UX-33).
+    const showHumidityCol =
+      c.fans.some((fan) => entityConfigured(fan.humidity_target)) ||
+      (entityConfigured(c.vent_fan_entity) && entityConfigured(c.vent_humidity_target));
 
-    const addDevice = (
-      label: string,
-      targetDevice: TargetTempDevice,
-      deviceEntity: string | undefined,
-      useToggle: string,
-      targetHelper: string,
-      highOffsetHelper: string,
-      modeFn: (hass: HomeAssistant, id: string) => string,
-      fanOnlyOverrideToggle?: string,
-      suppressed = false
-    ) => {
+    // A labeled value+arrows column (UX-9): the word "target" is dropped from
+    // the visible value, which sits above the arrows in fixed-height text so
+    // rows never shift whether or not a value is present (UX-6).
+    const renderStack = (
+      value: number,
+      min: number,
+      max: number,
+      unit: string,
+      raiseLabel: string,
+      lowerLabel: string,
+      onAdjust: (delta: number) => void
+    ) => html`
+      <div class="target-stack">
+        <span class="target-value">${value}${unit}</span>
+        <div class="temp-arrows">
+          <button
+            class="rcc-btn temp-arrow-btn"
+            aria-label=${raiseLabel}
+            .disabled=${value >= max}
+            @click=${() => onAdjust(1)}
+          >
+            <ha-icon icon="mdi:menu-up"></ha-icon>
+          </button>
+          <button
+            class="rcc-btn temp-arrow-btn"
+            aria-label=${lowerLabel}
+            .disabled=${value <= min}
+            @click=${() => onAdjust(-1)}
+          >
+            <ha-icon icon="mdi:menu-down"></ha-icon>
+          </button>
+        </div>
+      </div>
+    `;
+
+    const addDevice = (opts: {
+      label: string;
+      targetDevice: TargetTempDevice;
+      deviceEntity: string | undefined;
+      useToggle: string;
+      targetHelper: string;
+      highOffsetHelper?: string;
+      modeFn: (hass: HomeAssistant, id: string) => string;
+      fanOnlyOverrideToggle?: string;
+      suppressed?: boolean;
+      /** This row's own humidity target entity, or undefined/empty when this
+      row isn't humidity-triggered (cooling/heating rows). */
+      humidityTargetHelper?: string;
+      humidityHighOffsetHelper?: string;
+    }) => {
+      const {
+        label,
+        targetDevice,
+        deviceEntity,
+        useToggle,
+        targetHelper,
+        highOffsetHelper,
+        modeFn,
+        fanOnlyOverrideToggle,
+        suppressed = false,
+        humidityTargetHelper,
+        humidityHighOffsetHelper,
+      } = opts;
+
       if (!entityConfigured(deviceEntity) || !entityAvailable(this.hass, deviceEntity)) {
         return;
       }
@@ -261,7 +321,7 @@ export class RoomClimateControl extends LitElement {
         targetDevice,
         getNumberLimits(this.hass, targetHelper),
         siblingTarget,
-        getTargetTempValue(this.hass, highOffsetHelper)
+        highOffsetHelper ? getTargetTempValue(this.hass, highOffsetHelper) : undefined
       );
       const mode = modeFn(this.hass, entity);
       const adjustTarget = (delta: number) => {
@@ -276,6 +336,37 @@ export class RoomClimateControl extends LitElement {
       const fanOvrState = showFanOvrCol
         ? getStateObj(this.hass, fanOnlyOverrideToggle!)
         : undefined;
+
+      const humidityConfigured = entityConfigured(humidityTargetHelper);
+      let humidityStack: TemplateResult | typeof nothing = nothing;
+      if (humidityConfigured) {
+        const humidityTarget = getTargetTemp(this.hass, humidityTargetHelper!, 60);
+        const humidityHighOffset = humidityHighOffsetHelper
+          ? getTargetTempValue(this.hass, humidityHighOffsetHelper)
+          : undefined;
+        const hLimits = getHumidityTargetLimits(
+          getNumberLimits(this.hass, humidityTargetHelper!),
+          humidityHighOffset
+        );
+        const adjustHumidity = (delta: number) => {
+          const next = Math.min(
+            hLimits.max,
+            Math.max(hLimits.min, humidityTarget + delta)
+          );
+          if (next !== humidityTarget) {
+            setInputNumber(this.hass, humidityTargetHelper!, next);
+          }
+        };
+        humidityStack = renderStack(
+          humidityTarget,
+          hLimits.min,
+          hLimits.max,
+          "%",
+          `Raise ${label} humidity target`,
+          `Lower ${label} humidity target`,
+          adjustHumidity
+        );
+      }
 
       rows.push(html`
         <div class="device-row">
@@ -293,30 +384,24 @@ export class RoomClimateControl extends LitElement {
           >
             <div class="device-label">${label}</div>
             <div class="device-secondary">
-              <span>${targetTemp}°F target</span>
-              <span class="device-meta-sep">·</span>
               <span>${mode}</span>
             </div>
           </div>
           <div class="device-toggles">
-            <div class="temp-arrows">
-              <button
-                class="rcc-btn temp-arrow-btn"
-                aria-label=${`Raise ${label} target`}
-                .disabled=${targetTemp >= max}
-                @click=${() => adjustTarget(1)}
-              >
-                <ha-icon icon="mdi:menu-up"></ha-icon>
-              </button>
-              <button
-                class="rcc-btn temp-arrow-btn"
-                aria-label=${`Lower ${label} target`}
-                .disabled=${targetTemp <= min}
-                @click=${() => adjustTarget(-1)}
-              >
-                <ha-icon icon="mdi:menu-down"></ha-icon>
-              </button>
-            </div>
+            ${showHumidityCol
+              ? humidityConfigured
+                ? humidityStack
+                : html`<div class="target-stack-spacer" aria-hidden="true"></div>`
+              : nothing}
+            ${renderStack(
+              targetTemp,
+              min,
+              max,
+              "°F",
+              `Raise ${label} target`,
+              `Lower ${label} target`,
+              adjustTarget
+            )}
             ${showFanOvrCol && fanOvrState
               ? html`
                   <div class="use-toggle">
@@ -348,40 +433,60 @@ export class RoomClimateControl extends LitElement {
       entityConfigured(c.heater_entity) &&
       c.ac_entity === c.heater_entity;
 
-    addDevice(
-      "Cooling",
-      "cooling",
-      c.ac_entity,
-      c.use_ac,
-      c.target_cooling,
-      c.cooling_high_offset,
-      getHvacMode,
-      c.ac_fan_only_override,
-      winOpen
-    );
-    addDevice(
-      "Heating",
-      "heating",
-      c.heater_entity,
-      c.use_heater,
-      c.target_heating,
-      c.heating_high_offset,
-      getHvacMode,
-      sharedClimateDevice ? undefined : c.heater_fan_only_override,
-      winOpen
-    );
+    addDevice({
+      label: "Cooling",
+      targetDevice: "cooling",
+      deviceEntity: c.ac_entity,
+      useToggle: c.use_ac,
+      targetHelper: c.target_cooling,
+      highOffsetHelper: c.cooling_high_offset,
+      modeFn: getHvacMode,
+      fanOnlyOverrideToggle: c.ac_fan_only_override,
+      suppressed: winOpen,
+    });
+    addDevice({
+      label: "Heating",
+      targetDevice: "heating",
+      deviceEntity: c.heater_entity,
+      useToggle: c.use_heater,
+      targetHelper: c.target_heating,
+      highOffsetHelper: c.heating_high_offset,
+      modeFn: getHvacMode,
+      fanOnlyOverrideToggle: sharedClimateDevice ? undefined : c.heater_fan_only_override,
+      suppressed: winOpen,
+    });
     // One row per fan. All fans share the room's single high offset (used only
-    // for the effective-limit math), but each has its own use/target/reverse.
+    // for the effective-limit math), but each has its own use/target/reverse
+    // and its own humidity target + offsets (CC-28 amendment).
     for (const fan of c.fans) {
-      addDevice(
-        fan.label,
-        "fan",
-        fan.entity_id,
-        fan.use,
-        fan.target,
-        c.fan_high_offset,
-        (hass, id) => getFanMode(hass, id, fan.reversible)
-      );
+      addDevice({
+        label: fan.label,
+        targetDevice: "fan",
+        deviceEntity: fan.entity_id,
+        useToggle: fan.use,
+        targetHelper: fan.target,
+        highOffsetHelper: c.fan_high_offset,
+        modeFn: (hass, id) => getFanMode(hass, id, fan.reversible),
+        humidityTargetHelper: fan.humidity_target,
+        humidityHighOffsetHelper: fan.humidity_high_offset,
+      });
+    }
+    // Vent fan row (issue #77, UX-34): plain on/off device, own temp + humidity
+    // targets, no offsets, no Fan Ovr column, windows don't suppress it (same
+    // as the other fan rows).
+    if (entityConfigured(c.vent_fan_entity)) {
+      const ventState = getStateObj(this.hass, c.vent_fan_entity!);
+      const ventLabel =
+        (ventState?.attributes.friendly_name as string | undefined) || "Vent Fan";
+      addDevice({
+        label: ventLabel,
+        targetDevice: "vent",
+        deviceEntity: c.vent_fan_entity,
+        useToggle: c.use_vent_fan,
+        targetHelper: c.target_vent_fan,
+        modeFn: getOnOffMode,
+        humidityTargetHelper: c.vent_humidity_target,
+      });
     }
 
     if (rows.length === 0) return nothing;
@@ -405,7 +510,10 @@ export class RoomClimateControl extends LitElement {
             <div class="device-label">Manual Mode</div>
           </div>
           <div class="device-toggles">
-            <div class="temp-arrows-spacer" aria-hidden="true"></div>
+            ${showHumidityCol
+              ? html`<div class="target-stack-spacer" aria-hidden="true"></div>`
+              : nothing}
+            <div class="target-stack-spacer" aria-hidden="true"></div>
             <div class="toggle-spacer" aria-hidden="true"></div>
             <div class="use-toggle">
               <span class="use-label">Use</span>
@@ -423,7 +531,7 @@ export class RoomClimateControl extends LitElement {
     if (!this._config) return nothing;
     const deviceSections = buildDeviceSettingsFields(this._config);
     const fanFields = buildFanSettingsFields(this._config);
-    const humidityFields = buildHumiditySettingsFields(this._config);
+    const ventFields = buildVentSettingsFields(this._config);
     return html`
       <ha-dialog
         open
@@ -437,9 +545,7 @@ export class RoomClimateControl extends LitElement {
             renderDeviceSettingsSection(this.hass, fields)
           )}
           ${fanFields ? renderFanSettingsSection(this.hass, fanFields) : nothing}
-          ${humidityFields
-            ? renderHumiditySettingsSection(this.hass, humidityFields)
-            : nothing}
+          ${ventFields ? renderVentSettingsSection(this.hass, ventFields) : nothing}
         </div>
       </ha-dialog>
     `;

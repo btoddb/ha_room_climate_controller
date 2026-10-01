@@ -19,7 +19,9 @@ export interface RoomClimateUserConfig extends LovelaceCardConfig {
 plus every entity discovered from the integration for the chosen room. */
 /** One fan in a room. Each fan owns its Use switch, Target number and Reverse
 switch; `reversible` (detected per fan, CC-22) gates its Reverse control. The
-medium/high offsets are shared across the room's fans, not stored here. */
+medium/high offsets are shared across the room's fans, not stored here. Each
+fan also owns its own humidity target + medium/high offsets (CC-28 amendment);
+"" when the room has no humidity sensor. */
 export interface FanConfig {
   entity_id: string;
   slug: string;
@@ -28,6 +30,9 @@ export interface FanConfig {
   use: string;
   target: string;
   reverse: string;
+  humidity_target: string;
+  humidity_medium_offset: string;
+  humidity_high_offset: string;
 }
 
 export interface RoomClimateControlConfig extends LovelaceCardConfig {
@@ -59,11 +64,12 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   /** Shared medium/high fan-speed offsets for all the room's fans. */
   fan_medium_offset: string;
   fan_high_offset: string;
-  /** Room-level humidity target + shared offsets (CC-28); empty when the room
-  has no humidity control. */
-  humidity_target: string;
-  humidity_medium_offset: string;
-  humidity_high_offset: string;
+  /** The room's vent fan device (issue #77, CC-36): single on/off switch|fan
+  entity, triggered by its own temp and humidity targets. Empty when absent. */
+  vent_fan_entity?: string;
+  use_vent_fan: string;
+  target_vent_fan: string;
+  vent_humidity_target: string;
   outdoor_sensor?: string;
   time_range?: string;
   /** Room key for climate profiles (e.g. todds_bedroom). Inferred from manual_mode if omitted. */
@@ -96,9 +102,9 @@ export function defaultConfig(
     heating_high_offset: "",
     fan_medium_offset: "",
     fan_high_offset: "",
-    humidity_target: "",
-    humidity_medium_offset: "",
-    humidity_high_offset: "",
+    use_vent_fan: "",
+    target_vent_fan: "",
+    vent_humidity_target: "",
     outdoor_sensor: DEFAULT_OUTDOOR_SENSOR,
     time_range: DEFAULT_TIME_RANGE,
     ...partial,

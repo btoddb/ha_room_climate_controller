@@ -13,6 +13,7 @@ export interface ClimateRoomMeta {
   label: string;
   has_heating: boolean;
   has_fan: boolean;
+  has_vent_fan: boolean;
 }
 
 let rooms: WsRoom[] = [];
@@ -67,16 +68,19 @@ export function climateRooms(): ClimateRoomMeta[] {
     label: r.label,
     has_heating: r.has_heating,
     has_fan: r.has_fan,
+    has_vent_fan: r.has_vent_fan,
   }));
 }
 
 function toRoutine(p: WsProfile): RoutineConfig {
   const presets = p.entities.presets ?? {};
+  const ventPreset = presets.vent_fan;
   const room: RoomPresetConfig = {
     name: roomMetaByKey(p.room)?.label ?? p.room,
     roomKey: p.room,
     has_heating: p.has_heating,
     has_fan: p.has_fan,
+    has_vent_fan: roomMetaByKey(p.room)?.has_vent_fan,
     useCooling: presets.cooling?.use_entity ?? undefined,
     useHeating: presets.heating?.use_entity ?? undefined,
     fanOverride: p.entities.fan_override ?? undefined,
@@ -92,7 +96,19 @@ function toRoutine(p: WsProfile): RoutineConfig {
       useEntity: fp.use_entity ?? "",
       tempEntity: fp.temp_entity ?? "",
       reverseEntity: fp.reverse_entity ?? "",
+      humidity: fp.humidity ?? null,
+      humidityEntity: fp.humidity_entity ?? "",
     })),
+    vent: ventPreset
+      ? {
+          use: ventPreset.use,
+          temp: ventPreset.temp,
+          humidity: ventPreset.humidity ?? null,
+          useEntity: ventPreset.use_entity ?? "",
+          tempEntity: ventPreset.temp_entity ?? "",
+          humidityEntity: ventPreset.humidity_entity ?? "",
+        }
+      : undefined,
   };
   return {
     profileId: p.id,

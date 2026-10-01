@@ -123,7 +123,7 @@ def test_humidity_trigger_reason_names_the_reading():
 
 
 def test_humidity_change_without_fans_is_logged_but_does_not_evaluate(caplog):
-    """CC-28: humidity is inert in a fan-less room, so no evaluation is requested."""
+    """CC-28: humidity is inert in a fan-less, vent-less room, so no evaluation runs."""
     room = _room(has_fan=False, fan_entities=())
     controller, hass = _make_controller(room)
 
@@ -131,6 +131,26 @@ def test_humidity_change_without_fans_is_logged_but_does_not_evaluate(caplog):
         controller._on_change(_change_event("sensor.office_humidity", "50", "60"))
 
     hass.async_create_task.assert_not_called()
+
+    messages = [r.message for r in caplog.records if r.name == LOGGER_SENSOR]
+    assert any("Humidity changed: 50 → 60%" in m for m in messages)
+
+
+def test_humidity_change_in_vent_only_room_schedules_a_run(caplog):
+    """CC-36: a vent-only room (no standalone fan) still evaluates on humidity."""
+    room = _room(
+        has_fan=False,
+        fan_entities=(),
+        has_vent_fan=True,
+        vent_fan_entity="switch.office_vent",
+    )
+    controller, hass = _make_controller(room)
+
+    with caplog.at_level(logging.INFO, logger=LOGGER_SENSOR):
+        controller._on_change(_change_event("sensor.office_humidity", "50", "60"))
+
+    hass.async_create_task.assert_called_once()
+    _close_scheduled(hass)
 
     messages = [r.message for r in caplog.records if r.name == LOGGER_SENSOR]
     assert any("Humidity changed: 50 → 60%" in m for m in messages)

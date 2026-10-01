@@ -18,14 +18,12 @@ from homeassistant.helpers.event import async_call_later
 from .apply import async_apply_profile
 from .const import (
     DEVICE_FAN,
+    DEVICE_VENT,
     DOMAIN,
     KEY_AC_FAN_ONLY,
     KEY_GRAPH_TIME_RANGE,
     KEY_HEATER_FAN_ONLY,
     KEY_HIGH_OFFSET,
-    KEY_HUMIDITY_HIGH_OFFSET,
-    KEY_HUMIDITY_MEDIUM_OFFSET,
-    KEY_HUMIDITY_TARGET,
     KEY_MANUAL_MODE,
     KEY_MEDIUM_OFFSET,
     KEY_OUTDOOR_TEMPERATURE,
@@ -34,11 +32,13 @@ from .const import (
     KEY_PROFILE_PRESET,
     KEY_PROFILE_TIME,
     KEY_PROFILE_USE,
+    KEY_PROFILE_VENT_HUMIDITY,
     KEY_ROOM_HUMIDITY,
     KEY_ROOM_POWER,
     KEY_ROOM_TEMPERATURE,
     KEY_TARGET,
     KEY_USE,
+    KEY_VENT_HUMIDITY_TARGET,
     LOGGER_PROFILE,
     SIGNAL_ADD_PROFILE_ENTITIES,
     SIGNAL_REMOVE_PROFILE,
@@ -51,8 +51,12 @@ from .entity import (
     resolve_room_entity,
 )
 from .models import (
+    DevicePreset,
     Profile,
     Room,
+    fan_humidity_high_key,
+    fan_humidity_medium_key,
+    fan_humidity_target_key,
     fan_reverse_key,
     fan_slug,
     fan_target_key,
@@ -61,6 +65,7 @@ from .models import (
     format_profile_id,
     next_profile_id,
     normalize_time_hhmm,
+    profile_fan_humidity_key,
     profile_fan_reverse_key,
     profile_fan_temp_key,
     profile_fan_use_key,
@@ -135,6 +140,12 @@ def _serialize_room(
         for device in room.devices
         if device != DEVICE_FAN
     }
+    if DEVICE_VENT in live:
+        # Vent fan has no offsets (the generic entries above resolve null);
+        # add its own humidity target (CC-37), null without a humidity sensor.
+        live[DEVICE_VENT]["humidity_target"] = (
+            rr(KEY_VENT_HUMIDITY_TARGET, "number") if room.humidity_sensor else None
+        )
     fans = [
         {
             "entity_id": fan_eid,
@@ -146,6 +157,23 @@ def _serialize_room(
             "use": rr(fan_use_key(slug), "switch"),
             "target": rr(fan_target_key(slug), "number"),
             "reverse": rr(fan_reverse_key(slug), "switch"),
+            # Per-fan humidity target/offsets (CC-37); null without a humidity
+            # sensor.
+            "humidity_target": (
+                rr(fan_humidity_target_key(slug), "number")
+                if room.humidity_sensor
+                else None
+            ),
+            "humidity_medium_offset": (
+                rr(fan_humidity_medium_key(slug), "number")
+                if room.humidity_sensor
+                else None
+            ),
+            "humidity_high_offset": (
+                rr(fan_humidity_high_key(slug), "number")
+                if room.humidity_sensor
+                else None
+            ),
         }
         for fan_eid in room.fan_entities
     ]
@@ -156,6 +184,7 @@ def _serialize_room(
         "has_ac": room.has_ac,
         "has_heating": room.has_heater,
         "has_fan": room.has_fan,
+        "has_vent_fan": room.has_vent_fan,
         "combined": room.combined,
         "entities": {
             "manual_mode": rr(KEY_MANUAL_MODE, "switch"),
@@ -182,8 +211,10 @@ def _serialize_room(
             # state without re-specifying them — they live in the subentry config).
             "ac_entity": room.ac_climate if room.has_ac else None,
             "heater_entity": room.heater_climate if room.has_heater else None,
-            # Per-fan live entities (each fan has its own target/use/reverse); the
-            # fan-speed offsets below are shared across all the room's fans.
+            "vent_fan_entity": room.vent_fan_entity if room.has_vent_fan else None,
+            # Per-fan live entities (each fan has its own target/use/reverse/
+            # humidity target); the fan-speed offsets below are shared across
+            # all the room's fans.
             "fans": fans,
             "fan_offsets": (
                 {
@@ -191,17 +222,6 @@ def _serialize_room(
                     "high_offset": rr(KEY_HIGH_OFFSET[DEVICE_FAN], "number"),
                 }
                 if room.has_fan
-                else None
-            ),
-            # Room-level humidity target/offsets driving the fans (CC-28); only
-            # present when the room has both a humidity sensor and a fan.
-            "humidity_control": (
-                {
-                    "target": rr(KEY_HUMIDITY_TARGET, "number"),
-                    "medium_offset": rr(KEY_HUMIDITY_MEDIUM_OFFSET, "number"),
-                    "high_offset": rr(KEY_HUMIDITY_HIGH_OFFSET, "number"),
-                }
-                if room.has_fan and room.humidity_sensor
                 else None
             ),
             # Optional window contacts the card reads directly from hass.states to
@@ -223,6 +243,7 @@ def _serialize_profile(
     def rp(key: str, domain: str) -> str | None:
         return resolve_profile_entity(hass, eid, profile.id, key, domain)
 
+    has_humidity = bool(room and room.humidity_sensor)
     presets = {}
     for device in devices:
         if device == DEVICE_FAN:
@@ -234,6 +255,11 @@ def _serialize_profile(
             "use_entity": rp(KEY_PROFILE_USE[device], "switch"),
             "temp_entity": rp(KEY_PROFILE_PRESET[device], "number"),
         }
+        if device == DEVICE_VENT:
+            presets[device]["humidity"] = preset.humidity if preset else None
+            presets[device]["humidity_entity"] = (
+                rp(KEY_PROFILE_VENT_HUMIDITY, "number") if has_humidity else None
+            )
     fan_presets = []
     for fan_eid in room.fan_entities if room else ():
         slug = fan_slug(fan_eid)
@@ -249,6 +275,12 @@ def _serialize_profile(
                 "use_entity": rp(profile_fan_use_key(slug), "switch"),
                 "temp_entity": rp(profile_fan_temp_key(slug), "number"),
                 "reverse_entity": rp(profile_fan_reverse_key(slug), "switch"),
+                "humidity": fp.humidity if fp else None,
+                "humidity_entity": (
+                    rp(profile_fan_humidity_key(slug), "number")
+                    if has_humidity
+                    else None
+                ),
             }
         )
     has_fan_override = bool(room and room.has_ac and room.ac_fan_only)
@@ -550,6 +582,68 @@ async def ws_apply_profile(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _copy_device_preset(
+    hass: HomeAssistant,
+    entry: RoomClimateConfigEntry,
+    room: Room,
+    device: str,
+    preset: DevicePreset,
+) -> None:
+    """Seed one non-fan device's preset from its room live values."""
+    if use_eid := resolve_room_entity(
+        hass, entry.entry_id, room.key, KEY_USE[device], "switch"
+    ):
+        preset.use = hass.states.is_state(use_eid, STATE_ON)
+    target_eid = resolve_room_entity(
+        hass, entry.entry_id, room.key, KEY_TARGET[device], "number"
+    )
+    if target_eid and (state := hass.states.get(target_eid)) is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            preset.temp = float(state.state)
+    if device != DEVICE_VENT or not room.humidity_sensor:
+        return
+    hum_eid = resolve_room_entity(
+        hass, entry.entry_id, room.key, KEY_VENT_HUMIDITY_TARGET, "number"
+    )
+    if hum_eid and (state := hass.states.get(hum_eid)) is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            preset.humidity = float(state.state)
+
+
+def _copy_fan_preset(
+    hass: HomeAssistant,
+    entry: RoomClimateConfigEntry,
+    room: Room,
+    fan_eid: str,
+    profile: Profile,
+) -> None:
+    """Seed one fan's preset from its room live values."""
+    slug = fan_slug(fan_eid)
+    fp = profile.ensure_fan_preset(slug)
+    if use_eid := resolve_room_entity(
+        hass, entry.entry_id, room.key, fan_use_key(slug), "switch"
+    ):
+        fp.use = hass.states.is_state(use_eid, STATE_ON)
+    target_eid = resolve_room_entity(
+        hass, entry.entry_id, room.key, fan_target_key(slug), "number"
+    )
+    if target_eid and (state := hass.states.get(target_eid)) is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            fp.temp = float(state.state)
+    if rev_eid := resolve_room_entity(
+        hass, entry.entry_id, room.key, fan_reverse_key(slug), "switch"
+    ):
+        fp.reverse = hass.states.is_state(rev_eid, STATE_ON)
+    if not room.humidity_sensor:
+        return
+    hum_eid = resolve_room_entity(
+        hass, entry.entry_id, room.key, fan_humidity_target_key(slug), "number"
+    )
+    if hum_eid and (state := hass.states.get(hum_eid)) is not None:
+        with contextlib.suppress(TypeError, ValueError):
+            fp.humidity = float(state.state)
+
+
 def _copy_room_into_profile(
     hass: HomeAssistant, entry: RoomClimateConfigEntry, room: Room, profile: Profile
 ) -> None:
@@ -560,16 +654,7 @@ def _copy_room_into_profile(
         preset = profile.presets.get(device)
         if preset is None:
             continue
-        if use_eid := resolve_room_entity(
-            hass, entry.entry_id, room.key, KEY_USE[device], "switch"
-        ):
-            preset.use = hass.states.is_state(use_eid, STATE_ON)
-        target_eid = resolve_room_entity(
-            hass, entry.entry_id, room.key, KEY_TARGET[device], "number"
-        )
-        if target_eid and (state := hass.states.get(target_eid)) is not None:
-            with contextlib.suppress(TypeError, ValueError):
-                preset.temp = float(state.state)
+        _copy_device_preset(hass, entry, room, device, preset)
     if (
         room.has_ac
         and room.ac_fan_only
@@ -581,22 +666,7 @@ def _copy_room_into_profile(
     ):
         profile.fan_override = hass.states.is_state(ov_eid, STATE_ON)
     for fan_eid in room.fan_entities:
-        slug = fan_slug(fan_eid)
-        fp = profile.ensure_fan_preset(slug)
-        if use_eid := resolve_room_entity(
-            hass, entry.entry_id, room.key, fan_use_key(slug), "switch"
-        ):
-            fp.use = hass.states.is_state(use_eid, STATE_ON)
-        target_eid = resolve_room_entity(
-            hass, entry.entry_id, room.key, fan_target_key(slug), "number"
-        )
-        if target_eid and (state := hass.states.get(target_eid)) is not None:
-            with contextlib.suppress(TypeError, ValueError):
-                fp.temp = float(state.state)
-        if rev_eid := resolve_room_entity(
-            hass, entry.entry_id, room.key, fan_reverse_key(slug), "switch"
-        ):
-            fp.reverse = hass.states.is_state(rev_eid, STATE_ON)
+        _copy_fan_preset(hass, entry, room, fan_eid, profile)
 
 
 def _remove_profile_device(

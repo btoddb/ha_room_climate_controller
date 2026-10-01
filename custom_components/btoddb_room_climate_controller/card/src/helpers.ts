@@ -106,7 +106,7 @@ export function getNumberLimits(
   };
 }
 
-export type TargetTempDevice = "cooling" | "heating" | "fan";
+export type TargetTempDevice = "cooling" | "heating" | "fan" | "vent";
 
 /** Compute the allowed target range for a device.
 
@@ -114,7 +114,8 @@ A room can now have several fans, but every fan shares one high offset and the
 same min/max limits, and fans never constrain each other (no sibling coupling
 like cooling↔heating). So each fan resolves independently by passing
 `device: "fan"` with the shared `highOffset` and no `siblingTarget` — the "fan"
-branch below is per-fan-agnostic. */
+branch below is per-fan-agnostic. The vent fan (issue #77) has no offsets and no
+sibling coupling — `device: "vent"` is a plain limits passthrough. */
 export function getEffectiveTargetLimits(
   device: TargetTempDevice,
   limits: { min: number; max: number },
@@ -147,6 +148,28 @@ export function getEffectiveTargetLimits(
     };
   }
   return effectiveLimits;
+}
+
+/** Compute the allowed humidity-target range for a humidity-triggered row
+(mirrors CC-18's offset clamp for temp targets): the target can't be pushed so
+high that target + highOffset exceeds 100%. */
+export function getHumidityTargetLimits(
+  limits: { min: number; max: number },
+  highOffset?: number
+): { min: number; max: number } {
+  return {
+    min: limits.min,
+    max: Math.min(limits.max, 100 - (highOffset ?? 0)),
+  };
+}
+
+/** On/off status for a switch/fan entity not represented by `getFanMode` or
+`getHvacMode` (e.g. the vent fan's plain On/Off toggle, UX-34). */
+export function getOnOffMode(hass: HomeAssistant, entityId: string): string {
+  const state = hass.states[entityId];
+  if (!state) return "Unavailable";
+  if (state.state === "unavailable" || state.state === "unknown") return "Unavailable";
+  return state.state === "on" ? "On" : "Off";
 }
 
 /** Set a number value on `number.*` or legacy `input_number.*` (domain-aware). */

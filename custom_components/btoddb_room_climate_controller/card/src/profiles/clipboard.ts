@@ -7,6 +7,9 @@ export const CLIPBOARD_TYPE = "daily-routine-climate-temps" as const;
 export interface ClipboardDevicePreset {
   use?: boolean;
   temp?: number;
+  /** This device's own humidity target (issue #77); absent from pre-humidity
+  payloads, which must still parse and apply unchanged. */
+  humidity?: number;
 }
 
 /** v3 per-fan clipboard entry, matched onto a target room's fans by `slug`. */
@@ -16,6 +19,9 @@ export interface ClipboardFanPreset {
   use?: boolean;
   temp?: number;
   reverse?: boolean;
+  /** This fan's own humidity target (issue #77, CC-28 amendment); absent from
+  pre-humidity payloads. */
+  humidity?: number;
 }
 
 export interface ClipboardRoomTemps {
@@ -28,6 +34,9 @@ export interface ClipboardRoomTemps {
   fan?: ClipboardDevicePreset | number;
   /** v3 per-fan presets. */
   fans?: ClipboardFanPreset[];
+  /** The room's Vent Fan preset (issue #77); absent from pre-vent payloads and
+  for rooms without a vent fan. */
+  vent?: ClipboardDevicePreset;
 }
 
 export interface RoutineClipboardPayload {
@@ -85,16 +94,35 @@ export function buildClipboardPayload(
         const fanTemp = readTemp(hass, fan.tempEntity);
         const fanUse = readUse(hass, fan.useEntity);
         const fanRev = fan.reversible ? readUse(hass, fan.reverseEntity) : undefined;
-        if (fanTemp === undefined && fanUse === undefined && fanRev === undefined) {
+        const fanHumidity = readTemp(hass, fan.humidityEntity);
+        if (
+          fanTemp === undefined &&
+          fanUse === undefined &&
+          fanRev === undefined &&
+          fanHumidity === undefined
+        ) {
           continue;
         }
         const fanEntry: ClipboardFanPreset = { slug: fan.slug, label: fan.label };
         if (fanUse !== undefined) fanEntry.use = fanUse;
         if (fanTemp !== undefined) fanEntry.temp = fanTemp;
         if (fanRev !== undefined) fanEntry.reverse = fanRev;
+        if (fanHumidity !== undefined) fanEntry.humidity = fanHumidity;
         fans.push(fanEntry);
       }
       if (fans.length) entry.fans = fans;
+    }
+    if (room.vent) {
+      const ventTemp = readTemp(hass, room.vent.tempEntity);
+      const ventUse = readUse(hass, room.vent.useEntity);
+      const ventHumidity = readTemp(hass, room.vent.humidityEntity);
+      if (ventTemp !== undefined || ventUse !== undefined || ventHumidity !== undefined) {
+        const ventEntry: ClipboardDevicePreset = {};
+        if (ventUse !== undefined) ventEntry.use = ventUse;
+        if (ventTemp !== undefined) ventEntry.temp = ventTemp;
+        if (ventHumidity !== undefined) ventEntry.humidity = ventHumidity;
+        entry.vent = ventEntry;
+      }
     }
     const fanOvr = readUse(hass, room.fanOverride);
     if (fanOvr !== undefined) entry.fanOverride = fanOvr;
@@ -170,6 +198,36 @@ export function applyClipboardPayload(
     }
 
     applied += applyFans(room, src, setValue, setUse);
+    applied += applyVent(room, src, setValue, setUse);
+  }
+  return applied;
+}
+
+/** Apply the clipboard's Vent Fan preset (issue #77) onto a target room's vent
+fan, when both the room has one and the clipboard carries one. Humidity is
+additive — a pre-vent/pre-humidity payload has no `vent` key and simply
+applies nothing here. */
+function applyVent(
+  room: RoomPresetConfig,
+  src: ClipboardRoomTemps,
+  setValue: (entityId: string, value: number) => void,
+  setUse: (entityId: string, on: boolean) => void
+): number {
+  if (!room.vent || !src.vent) return 0;
+  let applied = 0;
+  const { vent } = room;
+  const preset = src.vent;
+  if (preset.use !== undefined && entityConfigured(vent.useEntity)) {
+    setUse(vent.useEntity, preset.use);
+    applied++;
+  }
+  if (preset.temp !== undefined && entityConfigured(vent.tempEntity)) {
+    setValue(vent.tempEntity, preset.temp);
+    applied++;
+  }
+  if (preset.humidity !== undefined && entityConfigured(vent.humidityEntity)) {
+    setValue(vent.humidityEntity, preset.humidity);
+    applied++;
   }
   return applied;
 }
@@ -208,6 +266,10 @@ function applyFans(
         entityConfigured(fan.reverseEntity)
       ) {
         setUse(fan.reverseEntity, cf.reverse);
+        applied++;
+      }
+      if (cf.humidity !== undefined && entityConfigured(fan.humidityEntity)) {
+        setValue(fan.humidityEntity, cf.humidity);
         applied++;
       }
     }

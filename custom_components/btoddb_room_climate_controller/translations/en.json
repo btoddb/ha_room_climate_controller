@@ -31,7 +31,11 @@
             "has_ac": "Has air conditioning / cooling",
             "has_heater": "Has heating",
             "has_fan": "Has a standalone fan",
+            "has_vent_fan": "Has a vent fan",
             "combined": "Cooling and heating are the same unit (heat pump)"
+          },
+          "data_description": {
+            "has_vent_fan": "A single on/off switch or fan that exhausts air, e.g. a bathroom vent"
           }
         },
         "reconfigure": {
@@ -44,7 +48,11 @@
             "has_ac": "Has air conditioning / cooling",
             "has_heater": "Has heating",
             "has_fan": "Has a standalone fan",
+            "has_vent_fan": "Has a vent fan",
             "combined": "Cooling and heating are the same unit (heat pump)"
+          },
+          "data_description": {
+            "has_vent_fan": "A single on/off switch or fan that exhausts air, e.g. a bathroom vent"
           }
         },
         "devices": {
@@ -61,12 +69,14 @@
             "heater_power_switch": "Heater power switch",
             "heater_fan_only_override": "Allow heater fan-only circulation",
             "heater_setpoint_offset": "Heater setpoint offset (°F, optional, default 2)",
-            "fan_entities": "Fans"
+            "fan_entities": "Fans",
+            "vent_fan_entity": "Vent fan"
           },
           "data_description": {
             "ac_setpoint_offset": "While cooling, the device's own setpoint is the room target minus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
             "heater_setpoint_offset": "While heating, the device's own setpoint is the room target plus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
-            "fan_entities": "Standalone fans in this room (each gets its own target temperature; they share the room's fan-speed offsets)."
+            "fan_entities": "Standalone fans in this room (each gets its own target temperature; they share the room's fan-speed offsets).",
+            "vent_fan_entity": "On/off smart switch or smart vent fan; turned on by the room's humidity or temperature."
           }
         },
         "sensors": {
@@ -83,6 +93,8 @@
             "heating_max": "Heating maximum (°F)",
             "fan_min": "Fan minimum (°F)",
             "fan_max": "Fan maximum (°F)",
+            "vent_min": "Vent fan minimum (°F)",
+            "vent_max": "Vent fan maximum (°F)",
             "command_delay_seconds": "Delay after a mode change (seconds)",
             "power_on_delay_seconds": "Delay after powering on (seconds)"
           }
