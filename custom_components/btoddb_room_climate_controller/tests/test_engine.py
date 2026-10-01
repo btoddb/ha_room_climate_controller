@@ -2532,6 +2532,29 @@ def test_vent_fan_domain_dispatch():
     assert cmds_fan == [FanTurnOn("fan.vent")]
 
 
+def test_vent_fan_light_domain_dispatch():
+    """CC-36/CC-37: a 'light' domain vent gets Switch commands too, on/off."""
+    cmds_on = compute_commands(
+        _base(
+            vent_fan=_vent(
+                entity_id="light.vent", domain="light", target=72.0, is_on=False
+            ),
+            room_temp=90.0,
+        )
+    )
+    assert cmds_on == [SwitchTurnOn("light.vent")]
+
+    cmds_off = compute_commands(
+        _base(
+            vent_fan=_vent(
+                entity_id="light.vent", domain="light", target=72.0, is_on=True
+            ),
+            room_temp=60.0,
+        )
+    )
+    assert cmds_off == [SwitchTurnOff("light.vent")]
+
+
 def test_vent_fan_ignores_window_open():
     """CC-20: window-open suppresses Cool/Heat only — the vent fan is exempt."""
     cmds = compute_commands(

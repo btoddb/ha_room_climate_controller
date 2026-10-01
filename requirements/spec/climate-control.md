@@ -122,12 +122,13 @@ cooling or heating.
 
 ## Vent fan control
 
-A room may have **exactly one** vent fan: a single on/off **`switch` or `fan`**
-entity (no speed tiers, no direction) — e.g. a bathroom exhaust fan behind a smart
-switch. It is a distinct device type (`vent_fan`) from the standalone fans above.
+A room may have **exactly one** vent fan: a single on/off **`switch`, `light`, or
+`fan`** entity (no speed tiers, no direction) — e.g. a bathroom exhaust fan behind a
+smart switch, including a switch-module that registers in HA as a `light` entity. It
+is a distinct device type (`vent_fan`) from the standalone fans above.
 
 - **CC-36** With its own **Use** toggle on, the vent fan runs when the room is past its own **temperature** target (CC-27 cooling-style hysteresis against the vent fan's own reported on/off state) **or** past its own **humidity** target (CC-30 hysteresis); it turns off only when both decline. Commands are idempotent (CC-19): a command is emitted only on an actual on/off state change. An open window **never** suppresses it — CC-20's suppression covers active Cool/Heat only, not the vent fan. A missing or unreadable humidity reading degrades it to temperature-only (CC-31's fail-safe). An unavailable vent-fan entity is skipped (no commands, no crash).
-- **CC-37** The vent fan's live entities: a `use_vent_fan` **Use** switch (default off), a `target_vent_fan_temp` **number** (°F, the room's per-device vent-fan min/max limits, default at the minimum), and — only when the room has a humidity sensor — a `vent_fan_humidity_target` **number** (%, range 30–90, default 60). It has **no** medium/high offset entities of its own (on/off only, no speed ladder). On/off commands are sent via the entity's **own domain** — `fan.turn_on`/`fan.turn_off` for a `fan.*` entity, `switch.turn_on`/`switch.turn_off` for a `switch.*` entity.
+- **CC-37** The vent fan's live entities: a `use_vent_fan` **Use** switch (default off), a `target_vent_fan_temp` **number** (°F, the room's per-device vent-fan min/max limits, default at the minimum), and — only when the room has a humidity sensor — a `vent_fan_humidity_target` **number** (%, range 30–90, default 60). It has **no** medium/high offset entities of its own (on/off only, no speed ladder). On/off commands are sent via the entity's **own domain** — `fan.turn_on`/`fan.turn_off` for a `fan.*` entity, `switch.turn_on`/`switch.turn_off` for a `switch.*` entity, `light.turn_on`/`light.turn_off` for a `light.*` entity.
 
 ## Standalone fan direction
 

@@ -153,9 +153,13 @@ def _service_for(cmd: Command) -> tuple[str, str, dict]:  # noqa: PLR0911
             },
         )
     if isinstance(cmd, SwitchTurnOn):
-        return "switch", "turn_on", {"entity_id": cmd.entity_id}
+        # SwitchTurnOn/Off are also used for switch- and light-domain vent
+        # fans (CC-37); dispatch to the entity's own domain, not "switch".
+        domain = cmd.entity_id.split(".")[0]
+        return domain, "turn_on", {"entity_id": cmd.entity_id}
     if isinstance(cmd, SwitchTurnOff):
-        return "switch", "turn_off", {"entity_id": cmd.entity_id}
+        domain = cmd.entity_id.split(".")[0]
+        return domain, "turn_off", {"entity_id": cmd.entity_id}
     msg = f"Unknown command {cmd!r}"
     raise ValueError(msg)
 
@@ -334,8 +338,8 @@ class RoomController:
                     describe_fan_capabilities(self.hass, eid),
                 )
         # CC-36: a vent fan on the "fan" domain gets the same capability dump
-        # as the other fan entities above; a "switch" domain vent (like the
-        # A/C/heater power switches) has no capability dump to offer.
+        # as the other fan entities above; a "switch" or "light" domain vent
+        # (like the A/C/heater power switches) has no capability dump to offer.
         if (
             room.has_vent_fan
             and room.vent_fan_entity

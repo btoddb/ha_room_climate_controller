@@ -35,7 +35,7 @@
             "combined": "Cooling and heating are the same unit (heat pump)"
           },
           "data_description": {
-            "has_vent_fan": "A single on/off switch or fan that exhausts air, e.g. a bathroom vent"
+            "has_vent_fan": "A single on/off switch, light-style switch, or fan that exhausts air, e.g. a bathroom vent"
           }
         },
         "reconfigure": {
@@ -52,7 +52,7 @@
             "combined": "Cooling and heating are the same unit (heat pump)"
           },
           "data_description": {
-            "has_vent_fan": "A single on/off switch or fan that exhausts air, e.g. a bathroom vent"
+            "has_vent_fan": "A single on/off switch, light-style switch, or fan that exhausts air, e.g. a bathroom vent"
           }
         },
         "devices": {
@@ -76,7 +76,7 @@
             "ac_setpoint_offset": "While cooling, the device's own setpoint is the room target minus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
             "heater_setpoint_offset": "While heating, the device's own setpoint is the room target plus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
             "fan_entities": "Standalone fans in this room (each gets its own target temperature; they share the room's fan-speed offsets).",
-            "vent_fan_entity": "On/off smart switch or smart vent fan; turned on by the room's humidity or temperature."
+            "vent_fan_entity": "On/off smart switch (switch or light entity) or smart vent fan; turned on by the room's humidity or temperature."
           }
         },
         "sensors": {
