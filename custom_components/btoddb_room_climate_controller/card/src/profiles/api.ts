@@ -107,7 +107,7 @@ export interface WsRoom {
     fans: WsFanEntity[];
     /** Shared medium/high offsets for the room's fans, or null when no fan. */
     fan_offsets: WsFanOffsets | null;
-    /** The room's vent fan switch/fan entity, or null when absent. */
+    /** The room's vent fan switch/fan/light entity, or null when absent. */
     vent_fan_entity: string | null;
     window_sensors: string[];
     /** "cooling"/"heating"/"vent_fan" — the "fan" key moved to `fans`. */

@@ -16,7 +16,14 @@ from custom_components.btoddb_room_climate_controller.const import (
     KEY_USE,
     KEY_VENT_HUMIDITY_TARGET,
 )
-from custom_components.btoddb_room_climate_controller.controller import RoomController
+from custom_components.btoddb_room_climate_controller.controller import (
+    RoomController,
+    _service_for,
+)
+from custom_components.btoddb_room_climate_controller.engine import (
+    SwitchTurnOff,
+    SwitchTurnOn,
+)
 
 
 def _room(**overrides):
@@ -183,3 +190,27 @@ def test_vent_fan_control_humidity_target_none_without_humidity_sensor():
 
     assert vent is not None
     assert vent.humidity_target is None
+
+
+def test_service_for_switch_commands_dispatch_to_entitys_own_domain():
+    """CC-37: SwitchTurnOn/Off dispatch to the command's own entity domain."""
+    assert _service_for(SwitchTurnOn("switch.x")) == (
+        "switch",
+        "turn_on",
+        {"entity_id": "switch.x"},
+    )
+    assert _service_for(SwitchTurnOff("switch.x")) == (
+        "switch",
+        "turn_off",
+        {"entity_id": "switch.x"},
+    )
+    assert _service_for(SwitchTurnOn("light.x")) == (
+        "light",
+        "turn_on",
+        {"entity_id": "light.x"},
+    )
+    assert _service_for(SwitchTurnOff("light.x")) == (
+        "light",
+        "turn_off",
+        {"entity_id": "light.x"},
+    )

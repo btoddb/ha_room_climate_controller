@@ -64,7 +64,7 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   /** Shared medium/high fan-speed offsets for all the room's fans. */
   fan_medium_offset: string;
   fan_high_offset: string;
-  /** The room's vent fan device (issue #77, CC-36): single on/off switch|fan
+  /** The room's vent fan device (issue #77, CC-36): single on/off switch|fan|light
   entity, triggered by its own temp and humidity targets. Empty when absent. */
   vent_fan_entity?: string;
   use_vent_fan: string;

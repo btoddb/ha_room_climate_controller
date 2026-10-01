@@ -119,8 +119,8 @@ _CLIMATE = _entity("climate")
 _FAN = _entity("fan")
 _FAN_MULTI = _entity("fan", multiple=True)
 _SWITCH = _entity("switch")
-# CC-36: a vent fan is a single on/off switch OR fan entity.
-_SWITCH_OR_FAN = _entity(["switch", "fan"])
+# CC-36: a vent fan is a single on/off switch, light, or fan entity.
+_VENT_FAN_DOMAINS = _entity(["switch", "fan", "light"])
 _BOOL = selector.BooleanSelector()
 
 
@@ -294,8 +294,8 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
                     describe_fan_capabilities(self.hass, entity_id),
                 )
         # CC-36: a vent fan on the "fan" domain gets the same capability dump
-        # as the other fan entities above; a "switch" domain vent (like the
-        # A/C/heater power switches) has no capability dump to offer.
+        # as the other fan entities above; a "switch" or "light" domain vent
+        # (like the A/C/heater power switches) has no capability dump to offer.
         if (entity_id := self._data.get(CONF_VENT_FAN_ENTITY)) and entity_id.split(".")[
             0
         ] == "fan":
@@ -468,7 +468,7 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
             ]
         if self._data.get(CONF_HAS_VENT_FAN):
             fields += [
-                (vol.Optional(CONF_VENT_FAN_ENTITY), _SWITCH_OR_FAN),
+                (vol.Optional(CONF_VENT_FAN_ENTITY), _VENT_FAN_DOMAINS),
             ]
         return fields
 

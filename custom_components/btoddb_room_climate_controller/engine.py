@@ -242,14 +242,14 @@ class FanControl:
 @dataclass(frozen=True)
 class VentFanControl:
     """
-    A room's single vent-fan device (CC-36): on/off only, switch or fan domain.
+    A room's single vent-fan device (CC-36): on/off only, fan, switch, or light domain.
 
     Triggered by temperature OR humidity against its own targets, same
     hysteresis as a standalone fan, with no speed tiers/direction/delay.
     """
 
     entity_id: str
-    domain: str  # "fan" or "switch" — drives which commands are emitted
+    domain: str  # "fan", "switch", or "light" — drives which commands are emitted
     is_on: bool
     use: bool
     target: float
@@ -866,7 +866,8 @@ def _vent_fan(vent: VentFanControl, inp: EngineInputs, out: _Out) -> None:
     hysteresis as a standalone fan (CC-27/CC-30). Idempotent (CC-19): emits a
     command only on an actual state change. Window-open is never consulted
     (CC-20 suppresses Cool/Heat only). Domain-native dispatch: a "fan" entity
-    gets FanTurnOn/Off, a "switch" entity gets SwitchTurnOn/Off.
+    gets FanTurnOn/Off; a "switch" or "light" entity gets SwitchTurnOn/Off,
+    executed against the entity's own domain.
     """
     temp_wants = _wants_cool(inp.room_temp, vent.target, vent.is_on)
     hum_active = inp.room_humidity is not None and vent.humidity_target is not None
