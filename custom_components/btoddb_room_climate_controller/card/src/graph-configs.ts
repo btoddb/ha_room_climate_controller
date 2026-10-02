@@ -84,7 +84,7 @@ function deviceTrace(
   return {
     entity,
     filters: [{ map_y: mapY }],
-    name: `$ex '${label}: ' + (Number(ys.at(-1)) === 1 ? 'On' : Number(ys.at(-1)) === 0 ? 'Off' : '—')`,
+    name: `$ex ${JSON.stringify(`${label}: `)} + (Number(ys.at(-1)) === 1 ? 'On' : Number(ys.at(-1)) === 0 ? 'Off' : '—')`,
     hovertemplate: "%{x|%H:%M}: %{y}<extra></extra>",
     yaxis: "y2",
     visible: `$ex hass.states['${entity}'] !== undefined`,
@@ -94,7 +94,8 @@ function deviceTrace(
 
 export function buildHistoryGraphConfig(
   config: RoomClimateControlConfig,
-  hours: number
+  hours: number,
+  ventFanLabel?: string
 ): Record<string, unknown> {
   const outdoor = config.outdoor_sensor || DEFAULT_OUTDOOR_SENSOR;
   const humidity = config.humidity_sensor?.trim() ? config.humidity_sensor : null;
@@ -183,6 +184,17 @@ export function buildHistoryGraphConfig(
     );
     if (trace) entities.push(trace);
   });
+  // Vent fan (UX-35): one more On/Off trace after the per-fan traces, continuing
+  // the fan color cycle. The card config carries "" when no vent fan is set.
+  if (config.vent_fan_entity?.trim()) {
+    const ventTrace = deviceTrace(
+      config.vent_fan_entity,
+      ventFanLabel ?? "Vent Fan",
+      FAN_TRACE_COLORS[config.fans.length % FAN_TRACE_COLORS.length],
+      "fan"
+    );
+    if (ventTrace) entities.push(ventTrace);
+  }
 
   return {
     type: "custom:plotly-graph",

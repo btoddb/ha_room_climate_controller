@@ -52,6 +52,7 @@ hand-edit the generated `www/` bundle.
 
 - **UX-15** A graph of when devices were actually **on**, plus current room temperature and outdoor temperature. "On" means the A/C/heater is actually heating/cooling — **fan-only counts as off** for this graph. No top margin.
 - **UX-32** When a room has a humidity sensor, the History graph adds a **humidity trace** (legend `Humidity: N %`, whole-percent hover) plotted against the temperature axis, whose title becomes `°F / %`; the axis range grows to include the humidity values (UX-18). Rooms without a humidity sensor render the graph unchanged.
+- **UX-35** When a room has a **vent fan** configured, the History graph adds one On/Off trace for it, **after** the per-fan traces, labeled with the vent fan's friendly name (falling back to "Vent Fan", consistent with UX-34) and styled like the fan traces (State axis, `y2`). Rooms without a vent fan render the graph unchanged.
 
 ## Graphs (Energy & History)
 
