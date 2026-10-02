@@ -228,6 +228,16 @@ export class RoomClimateControl extends LitElement {
     `;
   }
 
+  /** Vent fan display label: the entity's friendly name, else "Vent Fan". */
+  private _ventFanLabel(c: RoomClimateControlConfig): string {
+    const friendly = entityConfigured(c.vent_fan_entity)
+      ? (getStateObj(this.hass, c.vent_fan_entity!)?.attributes.friendly_name as
+          | string
+          | undefined)
+      : undefined;
+    return friendly || "Vent Fan";
+  }
+
   private _renderDevicesPanel(c: RoomClimateControlConfig) {
     const rows: TemplateResult[] = [];
     // Open window suppresses cooling/heating (CC-20); the Use toggles for those
@@ -475,11 +485,8 @@ export class RoomClimateControl extends LitElement {
     // targets, no offsets, no Fan Ovr column, windows don't suppress it (same
     // as the other fan rows).
     if (entityConfigured(c.vent_fan_entity)) {
-      const ventState = getStateObj(this.hass, c.vent_fan_entity!);
-      const ventLabel =
-        (ventState?.attributes.friendly_name as string | undefined) || "Vent Fan";
       addDevice({
-        label: ventLabel,
+        label: this._ventFanLabel(c),
         targetDevice: "vent",
         deviceEntity: c.vent_fan_entity,
         useToggle: c.use_vent_fan,
@@ -643,7 +650,7 @@ export class RoomClimateControl extends LitElement {
     host.appendChild(graphHost);
     const graph = await createPlotlyGraphCard(
       this.hass,
-      buildHistoryGraphConfig(c, hours)
+      buildHistoryGraphConfig(c, hours, this._ventFanLabel(c))
     );
     if (graph) {
       graphHost.appendChild(graph);
