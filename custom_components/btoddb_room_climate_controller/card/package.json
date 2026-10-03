@@ -1,6 +1,6 @@
 {
   "name": "room-climate-control-card",
-  "version": "1.4.113",
+  "version": "1.4.114",
   "private": true,
   "type": "module",
   "scripts": {
