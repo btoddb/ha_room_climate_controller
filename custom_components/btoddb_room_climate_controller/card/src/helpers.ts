@@ -172,6 +172,27 @@ export function getOnOffMode(hass: HomeAssistant, entityId: string): string {
   return state.state === "on" ? "On" : "Off";
 }
 
+/** Vent fan status (UX-34): plain On/Off, plus `· override until <h:mm AM/PM>`
+(browser-local time) while the manual override sensor (CC-38) reads on/off with
+a valid `until` timestamp (UX-36). A missing/unavailable/unknown sensor or a
+"none" state reads as no override; an unavailable vent fan stays "Unavailable". */
+export function getVentFanMode(
+  hass: HomeAssistant,
+  entityId: string,
+  overrideEntityId?: string
+): string {
+  const base = getOnOffMode(hass, entityId);
+  if (base === "Unavailable" || !entityConfigured(overrideEntityId)) return base;
+  const override = hass.states[overrideEntityId!];
+  if (!override || (override.state !== "on" && override.state !== "off")) return base;
+  const until = override.attributes.until;
+  if (typeof until !== "string" || !until) return base;
+  const end = new Date(until);
+  if (Number.isNaN(end.getTime())) return base;
+  const t = formatTime12h(`${end.getHours()}:${end.getMinutes()}`);
+  return `${base} · override until ${t}`;
+}
+
 /** Set a number value on `number.*` or legacy `input_number.*` (domain-aware). */
 export function setInputNumber(
   hass: HomeAssistant,

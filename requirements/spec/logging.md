@@ -20,9 +20,10 @@ a message tag):
 | `custom_components.btoddb_room_climate_controller.profile` | CC-L3a–j profile events |
 | `custom_components.btoddb_room_climate_controller.capabilities` | CC-L10 capability dumps |
 
-The `RCC commanded` line (CC-L7) and the diagnostic exception logs stay on the
-base `custom_components.btoddb_room_climate_controller.controller` logger — it's the
-device-action line, not a settings/sensor/profile event. Example: to see only
+The `RCC commanded` line (CC-L7), the vent fan override lines (CC-L11) and the
+diagnostic exception logs stay on the base
+`custom_components.btoddb_room_climate_controller.controller` logger — they're
+device-action lines, not settings/sensor/profile events. Example: to see only
 sensor activity, set `custom_components.btoddb_room_climate_controller.sensor: info`
 in the HA logger config (and `warning`/`error` to silence the others).
 
@@ -149,10 +150,12 @@ log is emitted for those transitions.
   (`humidity <old>→<new>%`), a window transition
   (`window <entity_id> opened|closed`), another tracked entity changing
   (`<entity_id> changed` — covers toggles/numbers, e.g. a CC-L4 toggle flip or
-  CC-L8 number edit), or `startup` (the initial evaluation run when the
+  CC-L8 number edit), `startup` (the initial evaluation run when the
   controller starts, and again after its delayed resubscribe — there is no
   sensor change to attribute it to, but devices may still need commanding to
-  reach the desired state).
+  reach the desired state), `vent fan override started` (a manual vent fan
+  change started or restarted an override, CC-38) or `vent fan override
+  expired` (the override ended and normal rules take over, CC-38).
 
 Logged by `controller.py` in `_run`, at **INFO**, on the base `controller`
 logger, after the evaluation's commands have all been attempted, using the
@@ -167,10 +170,11 @@ when a reading is available, then **per standalone fan**
 own humidity target/offsets (CC-28) when configured —
 ` hum target <N>% (med <N>% high <N>%)` — and finally, when the room has a
 vent fan, `vent <object_id> target <N>°F`, appending its own humidity target
-(CC-37) when configured — ` hum target <N>%` (the vent fan has no medium/high
-offsets to show; the `med`/`high` values shown for a fan or the cooling/heating
-devices are always the **absolute** threshold — target plus that offset, not
-the bare offset). Example:
+(CC-37) when configured — ` hum target <N>%` — and, while a manual override
+is active (CC-38), ` override on` or ` override off` (the vent fan has no
+medium/high offsets to show; the `med`/`high` values shown for a fan or the
+cooling/heating devices are always the **absolute** threshold — target plus
+that offset, not the bare offset). Example:
 `temp 78°F; cooling target 72°F (med 75°F high 78°F); humidity 68%; fan office_tower target 76°F (med 79°F high 82°F) hum target 60% (med 65% high 70%); vent bath_vent target 75°F hum target 55%`.
 
 ### Room target/offset edits (CC-L8)
@@ -206,6 +210,24 @@ Both call sites share the formatting helpers `describe_climate_capabilities` /
 `describe_fan_capabilities` in `entity.py` so the two dumps never drift. An
 entity whose state isn't loaded yet logs `<entity_id> (unavailable)` rather than
 raising.
+
+### Vent fan manual override (CC-L11)
+
+- **CC-L11** Each real on↔off transition of a room's vent fan entity is
+  classified (CC-39) and logged:
+  `[room=<key>] Vent fan <entity_id> <old>→<new>: <manual|user|automation|own> (context id=<id> user_id=<user_id|None> parent_id=<parent_id|None>) — <outcome>`
+  where `<outcome>` is `override on|off until <HH:MM>` (HA local time) when a
+  manual change starts or restarts an override (CC-38), `no override (manual
+  mode)` for a manual change while Manual Mode is on (CC-40), and `no override`
+  otherwise. Transitions from/to `unavailable`/`unknown` and attribute-only
+  updates are not logged. When an override ends:
+  `[room=<key>] Vent fan override expired` (followed by an evaluation with
+  trigger `vent fan override expired`, CC-L7), or
+  `[room=<key>] Vent fan override cleared: manual mode` when Manual Mode turns
+  on during an override (CC-40).
+
+Logged by `controller.py` (`_on_vent_change`, `_vent_override_expired`,
+`_clear_vent_override`) at **INFO** on the base `controller` logger.
 
 ### Copy/paste room settings (out of scope)
 

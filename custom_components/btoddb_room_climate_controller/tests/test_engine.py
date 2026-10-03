@@ -140,8 +140,9 @@ def _vent(
     use=True,
     target=72.0,
     humidity_target=None,
+    override=None,
 ):
-    """Build a VentFanControl (CC-36/CC-37)."""
+    """Build a VentFanControl (CC-36/CC-37/CC-38)."""
     return VentFanControl(
         entity_id=entity_id,
         domain=domain,
@@ -149,6 +150,7 @@ def _vent(
         use=use,
         target=target,
         humidity_target=humidity_target,
+        override=override,
     )
 
 
@@ -2594,3 +2596,68 @@ def test_vent_fan_hot_and_humid_emits_a_single_on_command():
         )
     )
     assert cmds == [SwitchTurnOn("switch.vent")]
+
+
+# --- vent fan manual override (CC-38) ---------------------------------------
+def test_vent_fan_override_on_runs_with_use_off_and_triggers_declining():
+    """CC-38: an "on" override turns the vent on regardless of Use and triggers."""
+    cmds_switch = compute_commands(
+        _base(
+            vent_fan=_vent(use=False, target=80.0, humidity_target=70.0, override=True),
+            room_temp=70.0,
+            room_humidity=40.0,
+        )
+    )
+    assert cmds_switch == [SwitchTurnOn("switch.vent")]
+
+    cmds_fan = compute_commands(
+        _base(
+            vent_fan=_vent(
+                entity_id="fan.vent",
+                domain="fan",
+                use=False,
+                target=80.0,
+                humidity_target=70.0,
+                override=True,
+            ),
+            room_temp=70.0,
+            room_humidity=40.0,
+        )
+    )
+    assert cmds_fan == [FanTurnOn("fan.vent")]
+
+
+def test_vent_fan_override_off_turns_off_while_triggers_want_on():
+    """CC-38: an "off" override turns a running vent off despite both triggers."""
+    cmds = compute_commands(
+        _base(
+            vent_fan=_vent(
+                is_on=True, use=True, target=72.0, humidity_target=50.0, override=False
+            ),
+            room_temp=90.0,
+            room_humidity=90.0,
+        )
+    )
+    assert cmds == [SwitchTurnOff("switch.vent")]
+
+
+def test_vent_fan_override_matching_state_emits_nothing():
+    """CC-19/CC-38: an override already matching the vent's state is idempotent."""
+    held_on = _vent(is_on=True, use=False, target=80.0, override=True)
+    assert compute_commands(_base(vent_fan=held_on, room_temp=70.0)) == []
+
+    held_off = _vent(is_on=False, use=True, target=72.0, override=False)
+    assert compute_commands(_base(vent_fan=held_off, room_temp=90.0)) == []
+
+
+def test_vent_fan_override_none_leaves_rules_unchanged():
+    """CC-36: with no override the normal Use + trigger rules decide."""
+    assert (
+        compute_commands(
+            _base(vent_fan=_vent(use=False, target=72.0, override=None), room_temp=90.0)
+        )
+        == []
+    )
+    assert compute_commands(
+        _base(vent_fan=_vent(use=True, target=72.0, override=None), room_temp=90.0)
+    ) == [SwitchTurnOn("switch.vent")]

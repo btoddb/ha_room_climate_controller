@@ -252,6 +252,28 @@ def test_threshold_context_includes_vent_fan():
     )
     context = _threshold_context(room, inputs)
     assert "vent office_vent target 72°F hum target 60%" in context
+    assert "override" not in context
+
+
+def test_threshold_context_includes_vent_override():
+    """CC-L7/CC-38: an active vent override is appended as ``override on|off``."""
+    room = _room(has_ac=False, has_heater=False, has_fan=False)
+    for override, suffix in ((True, "override on"), (False, "override off")):
+        inputs = _inputs(
+            fans=(),
+            room_humidity=55.0,
+            vent_fan=VentFanControl(
+                entity_id="switch.office_vent",
+                domain="switch",
+                is_on=False,
+                use=False,
+                target=72.0,
+                humidity_target=60.0,
+                override=override,
+            ),
+        )
+        context = _threshold_context(room, inputs)
+        assert f"vent office_vent target 72°F hum target 60% {suffix}" in context
 
 
 def test_device_label_maps_vent_fan_entity():

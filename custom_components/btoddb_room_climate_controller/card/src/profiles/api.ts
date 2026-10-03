@@ -109,6 +109,10 @@ export interface WsRoom {
     fan_offsets: WsFanOffsets | null;
     /** The room's vent fan switch/fan/light entity, or null when absent. */
     vent_fan_entity: string | null;
+    /** The vent fan's manual-override sensor (state none/on/off, attribute
+    `until`; CC-38), or null when there's no vent fan. Older backends omit it,
+    so readers must treat a missing value as none. */
+    vent_fan_override: string | null;
     window_sensors: string[];
     /** "cooling"/"heating"/"vent_fan" — the "fan" key moved to `fans`. */
     live: Record<string, WsRoomLive>;

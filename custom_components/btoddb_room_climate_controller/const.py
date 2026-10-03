@@ -38,6 +38,9 @@ SUBENTRY_TYPE_ROOM: Final = "room"
 SIGNAL_ADD_ROOM_ENTITIES: Final = f"{DOMAIN}_add_room_entities"
 SIGNAL_ADD_PROFILE_ENTITIES: Final = f"{DOMAIN}_add_profile_entities"
 SIGNAL_REMOVE_PROFILE: Final = f"{DOMAIN}_remove_profile"
+# Vent fan manual-override status (CC-38/CC-40), sent per room as
+# f"{SIGNAL_VENT_OVERRIDE}_{entry_id}_{room_key}" with (state, until).
+SIGNAL_VENT_OVERRIDE: Final = f"{DOMAIN}_vent_override"
 
 # --- Device types (cooling / heating / fan / vent fan) -----------------------
 DEVICE_COOLING: Final = "cooling"
@@ -155,6 +158,12 @@ HUMIDITY_OFFSET_MAX: Final = 30
 DEFAULT_HUMIDITY_MEDIUM_OFFSET: Final = 5
 DEFAULT_HUMIDITY_HIGH_OFFSET: Final = 10
 
+# Vent fan manual override (CC-38/CC-39): how long a manual wall-switch toggle
+# holds the vent fan, and how long after the controller's own command a
+# matching state change still counts as that command's echo.
+VENT_OVERRIDE_SECONDS: Final = 20 * 60
+VENT_ECHO_WINDOW_SECONDS: Final = 10
+
 # --- Room entity keys (unique_id / object_id suffixes) ----------------------
 # Shared by entity creation and the controller's entity-registry resolution.
 KEY_TARGET: Final = {
@@ -194,6 +203,8 @@ KEY_HUMIDITY_MEDIUM_OFFSET: Final = "humidity_medium_offset"
 KEY_HUMIDITY_HIGH_OFFSET: Final = "humidity_high_offset"
 # Vent fan's own humidity target (gated on the room having a humidity sensor).
 KEY_VENT_HUMIDITY_TARGET: Final = "vent_fan_humidity_target"
+# Vent fan manual-override status sensor (CC-40), only with a vent fan.
+KEY_VENT_OVERRIDE: Final = "vent_fan_override"
 KEY_MANUAL_MODE: Final = "manual_mode"
 KEY_AC_FAN_ONLY: Final = "ac_fan_only_override"
 KEY_HEATER_FAN_ONLY: Final = "heater_fan_only_override"

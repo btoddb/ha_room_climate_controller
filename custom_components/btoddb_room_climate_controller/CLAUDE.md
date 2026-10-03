@@ -19,7 +19,7 @@ this file is about *how the code is laid out and tested*.
 | `store.py` | Profile persistence in `.storage`. |
 | `websocket_api.py` | Card ↔ integration profile CRUD. |
 | `const.py` | All config keys, entity-key maps, defaults, limits. |
-| `number.py` / `switch.py` / `time.py` / `select.py` / `sensor.py` | Dynamic entity platforms (per-room and per-profile). |
+| `number.py` / `switch.py` / `time.py` / `select.py` / `sensor.py` | Dynamic entity platforms (per-room and per-profile). `sensor.py` also holds the per-room vent fan override status sensor (CC-40), fed by the controller over a dispatcher signal. |
 
 ## Rules
 
