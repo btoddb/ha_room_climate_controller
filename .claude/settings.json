@@ -55,7 +55,9 @@
       "Bash(grep -n 'extra_modules\\\\|extra_js\\\\|type=.module.\\\\|import\\(\\\\|_loadFragment\\\\|modulepreload' __TRACKED_VAR__/index.html)",
       "Bash(python3 -m pytest --import-mode=importlib custom_components/room_climate_controller/tests/ -q)",
       "Bash(python3 -m pytest -q)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(scripts/ship)",
+      "Bash(scripts/ship *)"
     ]
   }
 }
