@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import replace
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from homeassistant.const import STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import (
+    Context,
+    Event,
+    EventStateChangedData,
+    HomeAssistant,
+    callback,
+)
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DEFAULT_HUMIDITY_HIGH_OFFSET,
@@ -29,6 +39,9 @@ from .const import (
     KEY_VENT_HUMIDITY_TARGET,
     LOGGER_CAPABILITIES,
     LOGGER_SENSOR,
+    SIGNAL_VENT_OVERRIDE,
+    VENT_ECHO_WINDOW_SECONDS,
+    VENT_OVERRIDE_SECONDS,
 )
 from .engine import (
     ClimateInfo,
@@ -73,6 +86,10 @@ from .models import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from homeassistant.core import State
+
     from .hub import RoomClimateConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
@@ -242,8 +259,49 @@ def _threshold_context(room: Room, inputs: EngineInputs) -> str:
         part = f"vent {vent.entity_id.split('.')[-1]} target {int(vent.target)}°F"
         if vent.humidity_target is not None:
             part += f" hum target {int(vent.humidity_target)}%"
+        if vent.override is not None:
+            part += f" override {'on' if vent.override else 'off'}"
         parts.append(part)
     return "; ".join(parts)
+
+
+def _classify_vent_change(
+    old_state: State | None,
+    new_state: State | None,
+    ctx: Context,
+    own_cmd: tuple[str, bool, float] | None,
+    now: float,
+) -> str:
+    """
+    Classify a vent fan state change for the manual override (CC-38/CC-39).
+
+    Checked in order: ``"ignored"`` (not a real on<->off transition),
+    ``"own"`` (the controller's own command context), ``"user"`` (context
+    carries a user), ``"automation"`` (context has a parent), ``"own"`` again
+    for a context-less change to the commanded state within
+    ``VENT_ECHO_WINDOW_SECONDS`` (a device echoing under a fresh context),
+    otherwise ``"manual"`` — a physical wall-switch press. ``own_cmd`` is
+    ``(context id, commanded on-state, monotonic time)``.
+    """
+    old = old_state.state if old_state else None
+    new = new_state.state if new_state else None
+    if (
+        old not in (STATE_ON, STATE_OFF)
+        or new not in (STATE_ON, STATE_OFF)
+        or old == new
+    ):
+        return "ignored"
+    if own_cmd is not None and ctx.id == own_cmd[0]:
+        return "own"
+    if ctx.user_id is not None:
+        return "user"
+    if ctx.parent_id is not None:
+        return "automation"
+    if own_cmd is not None:
+        _cmd_id, cmd_on, cmd_at = own_cmd
+        if (new == STATE_ON) == cmd_on and now - cmd_at <= VENT_ECHO_WINDOW_SECONDS:
+            return "own"
+    return "manual"
 
 
 class RoomController:
@@ -267,12 +325,28 @@ class RoomController:
         # ``_setpoint_needs_send`` in engine.py. Cleared while manual mode is
         # active, since the user may change device setpoints by hand.
         self._last_commanded_setpoints: dict[str, tuple[str, int]] = {}
+        # Vent fan manual override (CC-38..CC-40): in-memory only. A dedicated
+        # listener on the physical vent entity classifies its changes; a
+        # manual one forces the vent on/off until the timer expires.
+        self._unsub_vent: Callable[[], None] | None = None
+        self._vent_override: bool | None = None
+        self._vent_override_until: datetime | None = None
+        self._unsub_vent_timer: Callable[[], None] | None = None
+        # (context id, commanded on-state, time.monotonic()) of the last vent
+        # command this controller sent, so its echo is never taken as manual.
+        self._vent_cmd: tuple[str, bool, float] | None = None
 
     # -- lifecycle -----------------------------------------------------------
     @callback
     def async_start(self) -> None:
         """Subscribe and run an initial evaluation."""
         self._resubscribe()
+        if self.room.has_vent_fan and self.room.vent_fan_entity:
+            # CC-38: a separate listener, never part of _tracked_ids, so a vent
+            # change never triggers the generic evaluation path.
+            self._unsub_vent = async_track_state_change_event(
+                self.hass, [self.room.vent_fan_entity], self._on_vent_change
+            )
         self.async_request_run(trigger="startup")
         self._log_capabilities()
         # Pick up our own entities that register a moment after setup.
@@ -289,6 +363,12 @@ class RoomController:
         if self._unsub_state:
             self._unsub_state()
             self._unsub_state = None
+        if self._unsub_vent:
+            self._unsub_vent()
+            self._unsub_vent = None
+        if self._unsub_vent_timer:
+            self._unsub_vent_timer()
+            self._unsub_vent_timer = None
 
     @callback
     def _delayed_resubscribe(self, _now: object) -> None:
@@ -426,10 +506,10 @@ class RoomController:
         """
         Vent-fan live entities (CC-36/CC-37).
 
-        The physical vent entity itself is deliberately not tracked, matching
-        the fan/climate pattern: tracking it would make a manual wall-switch
-        toggle trigger an instant evaluation that flips it right back. It's
-        corrected on the next natural evaluation instead.
+        The physical vent entity itself is not tracked by the generic
+        evaluation listener: a dedicated listener (``_on_vent_change``)
+        classifies its changes for the CC-38 manual override instead. A
+        non-manual change is still corrected on the next natural evaluation.
         """
         ids: set[str] = set()
         vent_keys: list[tuple[str, str]] = [
@@ -486,6 +566,100 @@ class RoomController:
             trigger = f"window {entity_id} {state_label}"
         self._resubscribe()
         self.async_request_run(trigger=trigger)
+
+    # -- vent fan manual override (CC-38..CC-40) -----------------------------
+    @callback
+    def _on_vent_change(self, event: Event[EventStateChangedData]) -> None:
+        """Classify a vent fan change; a manual one starts an override (CC-38)."""
+        data = event.data
+        old = data["old_state"]
+        new = data["new_state"]
+        ctx = event.context
+        kind = _classify_vent_change(old, new, ctx, self._vent_cmd, time.monotonic())
+        if kind == "ignored":
+            return
+        if kind in ("own", "manual"):
+            # The echo allowance is one-shot: once the echo has been seen (or
+            # a real press superseded the command), a later change to the
+            # commanded state must not be taken for the echo.
+            self._vent_cmd = None
+        outcome = "no override"
+        if kind == "manual":
+            # Same read (and dormant default) as _build_inputs (CC-40).
+            if self._switch_state(KEY_MANUAL_MODE, default=True):
+                outcome = "no override (manual mode)"
+            else:
+                self._start_vent_override(new.state == STATE_ON)
+                until = dt_util.as_local(self._vent_override_until)
+                outcome = (
+                    f"override {'on' if self._vent_override else 'off'} "
+                    f"until {until:%H:%M}"
+                )
+        _LOGGER.info(
+            "[room=%s] Vent fan %s %s→%s: %s "
+            "(context id=%s user_id=%s parent_id=%s) — %s",
+            self.room.key,
+            data["entity_id"],
+            old.state,
+            new.state,
+            kind,
+            ctx.id,
+            ctx.user_id,
+            ctx.parent_id,
+            outcome,
+        )
+
+    @callback
+    def _start_vent_override(self, on: bool) -> None:  # noqa: FBT001
+        """Hold the vent fan on/off for VENT_OVERRIDE_SECONDS (CC-38)."""
+        if self._unsub_vent_timer:
+            self._unsub_vent_timer()
+        self._vent_override = on
+        self._vent_override_until = dt_util.utcnow() + timedelta(
+            seconds=VENT_OVERRIDE_SECONDS
+        )
+        self._unsub_vent_timer = async_call_later(
+            self.hass, VENT_OVERRIDE_SECONDS, self._vent_override_expired
+        )
+        self._publish_vent_override()
+        self.async_request_run(trigger="vent fan override started")
+
+    @callback
+    def _vent_override_expired(self, _now: object) -> None:
+        """End the override; normal rules decide at once (CC-38)."""
+        self._unsub_vent_timer = None
+        self._vent_override = None
+        self._vent_override_until = None
+        self._publish_vent_override()
+        _LOGGER.info("[room=%s] Vent fan override expired", self.room.key)
+        self.async_request_run(trigger="vent fan override expired")
+
+    @callback
+    def _clear_vent_override(self, reason: str) -> None:
+        """Drop an active override early, e.g. when Manual Mode turns on (CC-40)."""
+        if self._vent_override is None:
+            return
+        if self._unsub_vent_timer:
+            self._unsub_vent_timer()
+            self._unsub_vent_timer = None
+        self._vent_override = None
+        self._vent_override_until = None
+        self._publish_vent_override()
+        _LOGGER.info("[room=%s] Vent fan override cleared: %s", self.room.key, reason)
+
+    @callback
+    def _publish_vent_override(self) -> None:
+        """Push the override state to the room's status sensor (CC-40)."""
+        if self._vent_override is None:
+            state = "none"
+        else:
+            state = "on" if self._vent_override else "off"
+        async_dispatcher_send(
+            self.hass,
+            f"{SIGNAL_VENT_OVERRIDE}_{self.entry.entry_id}_{self.room.key}",
+            state,
+            self._vent_override_until,
+        )
 
     def _resolve_command(self, cmd: Command) -> Command:
         """
@@ -574,9 +748,7 @@ class RoomController:
                 # transient out-of-range setpoint) must not abandon the
                 # remaining commands for this room.
                 try:
-                    await self.hass.services.async_call(
-                        domain, service, data, blocking=True
-                    )
+                    await self._call_service(resolved_cmd, domain, service, data)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -612,6 +784,35 @@ class RoomController:
         except Exception:
             _LOGGER.exception("Room %s: control evaluation failed", self.room.key)
 
+    async def _call_service(
+        self, cmd: Command, domain: str, service: str, data: dict
+    ) -> None:
+        """
+        Send one command's service call (blocking).
+
+        CC-39: a vent fan command carries the controller's own context,
+        recorded in ``_vent_cmd`` before the await, so its state-change echo is
+        never mistaken for a manual press. On success the record's time is
+        refreshed so the echo window runs from call completion — unless the
+        echo already consumed it during the call. A failed vent call forgets
+        it; a cancelled one keeps it, since the device may still act on it.
+        """
+        if cmd.entity_id != self.room.vent_fan_entity:
+            await self.hass.services.async_call(domain, service, data, blocking=True)
+            return
+        ctx = Context()
+        cmd_on = service == "turn_on"
+        self._vent_cmd = (ctx.id, cmd_on, time.monotonic())
+        try:
+            await self.hass.services.async_call(
+                domain, service, data, blocking=True, context=ctx
+            )
+        except Exception:
+            self._vent_cmd = None
+            raise
+        if self._vent_cmd is not None and self._vent_cmd[0] == ctx.id:
+            self._vent_cmd = (ctx.id, cmd_on, time.monotonic())
+
     def _build_inputs(self) -> EngineInputs | None:
         """Read all live + device state; None if manual mode or invalid temp."""
         room = self.room
@@ -622,6 +823,8 @@ class RoomController:
             # change device setpoints by hand during manual mode, so
             # re-activation must re-enforce rather than trust stale memory.
             self._last_commanded_setpoints.clear()
+            # CC-40: Manual Mode ends any vent fan override.
+            self._clear_vent_override("manual mode")
             return None
         room_temp = self._temperature()
         if room_temp is None:
@@ -744,6 +947,7 @@ class RoomController:
                 KEY_TARGET[DEVICE_VENT], float(room.limits[DEVICE_VENT]["min"])
             ),
             humidity_target=humidity_target,
+            override=self._vent_override,
         )
 
     # -- state readers -------------------------------------------------------

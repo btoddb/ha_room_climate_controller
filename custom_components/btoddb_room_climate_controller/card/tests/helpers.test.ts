@@ -6,6 +6,7 @@ import {
   getHumidityTargetLimits,
   getNumberLimits,
   getTargetTempValue,
+  getVentFanMode,
   type TargetTempDevice,
 } from "../src/helpers.ts";
 import type { HomeAssistant } from "../src/ha-types.ts";
@@ -181,6 +182,86 @@ describe("getTargetTempValue", () => {
     const hass = { states: {} } as HomeAssistant;
 
     assert.equal(getTargetTempValue(hass, "number.heating_target"), undefined);
+  });
+});
+
+describe("getVentFanMode", () => {
+  const VENT = "switch.vent_fan";
+  const OVERRIDE = "sensor.vent_fan_override";
+  // 3:42 PM browser-local, serialized to a UTC ISO string like the backend's
+  // `until` attribute, so assertions hold in any test-machine timezone.
+  const UNTIL = new Date(2026, 9, 3, 15, 42).toISOString();
+
+  function ventHass(
+    ventState: string | undefined,
+    override?: { state: string; until?: string | null }
+  ): HomeAssistant {
+    const states: Record<string, unknown> = {};
+    if (ventState !== undefined) {
+      states[VENT] = { entity_id: VENT, state: ventState, attributes: {} };
+    }
+    if (override) {
+      states[OVERRIDE] = {
+        entity_id: OVERRIDE,
+        state: override.state,
+        attributes: { until: override.until ?? null },
+      };
+    }
+    return { states } as HomeAssistant;
+  }
+
+  it("shows plain On/Off when there is no override entity id", () => {
+    const hass = ventHass("on", { state: "on", until: UNTIL });
+    assert.equal(getVentFanMode(hass, VENT), "On");
+    assert.equal(getVentFanMode(hass, VENT, ""), "On");
+  });
+
+  it("shows plain On/Off when the override sensor reads none", () => {
+    assert.equal(getVentFanMode(ventHass("off", { state: "none" }), VENT, OVERRIDE), "Off");
+  });
+
+  it("appends the override end time while an on override is active", () => {
+    const hass = ventHass("on", { state: "on", until: UNTIL });
+    assert.equal(getVentFanMode(hass, VENT, OVERRIDE), "On · override until 3:42 PM");
+  });
+
+  it("appends the override end time while an off override is active", () => {
+    const hass = ventHass("off", { state: "off", until: UNTIL });
+    assert.equal(getVentFanMode(hass, VENT, OVERRIDE), "Off · override until 3:42 PM");
+  });
+
+  it("pads minutes and handles midnight in the override end time", () => {
+    const until = new Date(2026, 9, 4, 0, 5).toISOString();
+    const hass = ventHass("on", { state: "on", until });
+    assert.equal(getVentFanMode(hass, VENT, OVERRIDE), "On · override until 12:05 AM");
+  });
+
+  it("ignores an override with a null or unparseable until", () => {
+    assert.equal(
+      getVentFanMode(ventHass("on", { state: "on", until: null }), VENT, OVERRIDE),
+      "On"
+    );
+    assert.equal(
+      getVentFanMode(ventHass("on", { state: "on", until: "not-a-date" }), VENT, OVERRIDE),
+      "On"
+    );
+  });
+
+  it("treats an unavailable, unknown, or missing override sensor as none", () => {
+    for (const state of ["unavailable", "unknown"]) {
+      const hass = ventHass("on", { state, until: UNTIL });
+      assert.equal(getVentFanMode(hass, VENT, OVERRIDE), "On");
+    }
+    assert.equal(getVentFanMode(ventHass("on"), VENT, OVERRIDE), "On");
+  });
+
+  it("stays Unavailable when the vent fan entity is unavailable or missing", () => {
+    const override = { state: "on", until: UNTIL };
+    assert.equal(
+      getVentFanMode(ventHass("unavailable", override), VENT, OVERRIDE),
+      "Unavailable"
+    );
+    assert.equal(getVentFanMode(ventHass(undefined, override), VENT, OVERRIDE), "Unavailable");
   });
 });
 

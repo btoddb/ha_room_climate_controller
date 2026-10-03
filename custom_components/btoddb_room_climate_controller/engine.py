@@ -254,6 +254,9 @@ class VentFanControl:
     use: bool
     target: float
     humidity_target: float | None = None
+    # Forced on/off state from a manual wall-switch override (CC-38); None when
+    # no override is active. When set it bypasses Use and both triggers.
+    override: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -856,7 +859,7 @@ def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Vent fan (CC-36/CC-37)
+# Vent fan (CC-36/CC-37/CC-38)
 # ---------------------------------------------------------------------------
 def _vent_fan(vent: VentFanControl, inp: EngineInputs, out: _Out) -> None:
     """
@@ -867,14 +870,18 @@ def _vent_fan(vent: VentFanControl, inp: EngineInputs, out: _Out) -> None:
     command only on an actual state change. Window-open is never consulted
     (CC-20 suppresses Cool/Heat only). Domain-native dispatch: a "fan" entity
     gets FanTurnOn/Off; a "switch" or "light" entity gets SwitchTurnOn/Off,
-    executed against the entity's own domain.
+    executed against the entity's own domain. An active manual override
+    (CC-38) forces the state instead, bypassing Use and both triggers.
     """
-    temp_wants = _wants_cool(inp.room_temp, vent.target, vent.is_on)
-    hum_active = inp.room_humidity is not None and vent.humidity_target is not None
-    hum_wants = hum_active and _wants_fan_for_humidity(
-        inp.room_humidity, vent.humidity_target, vent.is_on
-    )
-    needs_on = vent.use and (temp_wants or hum_wants)
+    if vent.override is not None:
+        needs_on = vent.override
+    else:
+        temp_wants = _wants_cool(inp.room_temp, vent.target, vent.is_on)
+        hum_active = inp.room_humidity is not None and vent.humidity_target is not None
+        hum_wants = hum_active and _wants_fan_for_humidity(
+            inp.room_humidity, vent.humidity_target, vent.is_on
+        )
+        needs_on = vent.use and (temp_wants or hum_wants)
     if needs_on == vent.is_on:
         return
     if vent.domain == "fan":

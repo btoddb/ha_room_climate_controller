@@ -192,6 +192,22 @@ def test_vent_fan_control_humidity_target_none_without_humidity_sensor():
     assert vent.humidity_target is None
 
 
+def test_vent_fan_control_override_defaults_to_none():
+    """CC-38: with no manual override active the built control carries None."""
+    room = _room()
+    values = {
+        "switch.office_vent": "on",
+        f"switch.{KEY_USE[DEVICE_VENT]}": "on",
+        f"number.{KEY_TARGET[DEVICE_VENT]}": "72",
+    }
+    controller = _make_controller(room, values)
+
+    vent = controller._vent_fan_control(room)
+
+    assert vent is not None
+    assert vent.override is None
+
+
 def test_service_for_switch_commands_dispatch_to_entitys_own_domain():
     """CC-37: SwitchTurnOn/Off dispatch to the command's own entity domain."""
     assert _service_for(SwitchTurnOn("switch.x")) == (

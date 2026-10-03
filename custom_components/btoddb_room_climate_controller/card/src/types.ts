@@ -67,6 +67,8 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   /** The room's vent fan device (issue #77, CC-36): single on/off switch|fan|light
   entity, triggered by its own temp and humidity targets. Empty when absent. */
   vent_fan_entity?: string;
+  /** The vent fan's manual-override sensor (CC-38, UX-36). Empty when absent. */
+  vent_fan_override?: string;
   use_vent_fan: string;
   target_vent_fan: string;
   vent_humidity_target: string;

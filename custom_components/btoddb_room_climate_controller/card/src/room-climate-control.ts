@@ -29,10 +29,10 @@ import {
   getHumidityTargetLimits,
   getHvacMode,
   getNumberLimits,
-  getOnOffMode,
   getStateObj,
   getTargetTemp,
   getTargetTempValue,
+  getVentFanMode,
   setInputNumber,
   type TargetTempDevice,
   windowOpen,
@@ -483,7 +483,8 @@ export class RoomClimateControl extends LitElement {
     }
     // Vent fan row (issue #77, UX-34): plain on/off device, own temp + humidity
     // targets, no offsets, no Fan Ovr column, windows don't suppress it (same
-    // as the other fan rows).
+    // as the other fan rows). An active manual override (CC-38) is appended to
+    // the On/Off status (UX-36).
     if (entityConfigured(c.vent_fan_entity)) {
       addDevice({
         label: this._ventFanLabel(c),
@@ -491,7 +492,7 @@ export class RoomClimateControl extends LitElement {
         deviceEntity: c.vent_fan_entity,
         useToggle: c.use_vent_fan,
         targetHelper: c.target_vent_fan,
-        modeFn: getOnOffMode,
+        modeFn: (hass, id) => getVentFanMode(hass, id, c.vent_fan_override),
         humidityTargetHelper: c.vent_humidity_target,
       });
     }

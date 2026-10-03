@@ -39,6 +39,7 @@ from .const import (
     KEY_TARGET,
     KEY_USE,
     KEY_VENT_HUMIDITY_TARGET,
+    KEY_VENT_OVERRIDE,
     LOGGER_PROFILE,
     SIGNAL_ADD_PROFILE_ENTITIES,
     SIGNAL_REMOVE_PROFILE,
@@ -212,6 +213,11 @@ def _serialize_room(
             "ac_entity": room.ac_climate if room.has_ac else None,
             "heater_entity": room.heater_climate if room.has_heater else None,
             "vent_fan_entity": room.vent_fan_entity if room.has_vent_fan else None,
+            # Vent fan manual-override status sensor (CC-40): none/on/off with
+            # an ISO `until` attribute; null without a vent fan.
+            "vent_fan_override": (
+                rr(KEY_VENT_OVERRIDE, "sensor") if room.has_vent_fan else None
+            ),
             # Per-fan live entities (each fan has its own target/use/reverse/
             # humidity target); the fan-speed offsets below are shared across
             # all the room's fans.
