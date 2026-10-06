@@ -4,11 +4,15 @@ export function entityConfigured(entityId?: string): boolean {
   return Boolean(entityId && entityId.trim());
 }
 
-export function entityAvailable(hass: HomeAssistant, entityId?: string): boolean {
-  if (!entityConfigured(entityId)) return false;
-  const state = hass.states[entityId!];
-  if (!state) return false;
-  return state.state !== "unavailable" && state.state !== "unknown";
+/** Whether a device row renders (UX-37): the device entity is configured and
+exists in hass.states (even if unavailable/unknown), and its Use switch exists. */
+export function deviceRowVisible(
+  hass: HomeAssistant,
+  deviceEntity?: string,
+  useToggle?: string
+): boolean {
+  if (!entityConfigured(deviceEntity) || !hass.states[deviceEntity!]) return false;
+  return Boolean(useToggle && hass.states[useToggle]);
 }
 
 /** True when ANY of the room's window contacts reads "on" (open). Unconfigured,
@@ -170,6 +174,19 @@ export function getOnOffMode(hass: HomeAssistant, entityId: string): string {
   if (!state) return "Unavailable";
   if (state.state === "unavailable" || state.state === "unknown") return "Unavailable";
   return state.state === "on" ? "On" : "Off";
+}
+
+/** Device-row status (UX-37): "Unavailable" while the device entity reads
+unavailable/unknown, so a row never shows a stale speed, "Unknown", or "NaN%";
+otherwise the device type's own status from `modeFn`. */
+export function getDeviceStatus(
+  hass: HomeAssistant,
+  entityId: string,
+  modeFn: (hass: HomeAssistant, id: string) => string
+): string {
+  const state = hass.states[entityId]?.state;
+  if (state === "unavailable" || state === "unknown") return "Unavailable";
+  return modeFn(hass, entityId);
 }
 
 /** Vent fan status (UX-34): plain On/Off, plus `· override until <h:mm AM/PM>`

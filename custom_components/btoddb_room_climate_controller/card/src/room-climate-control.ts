@@ -19,11 +19,12 @@ import { GraphOverlay } from "./graph-overlay";
 import {
   createLovelaceCard,
   createPlotlyGraphCard,
-  entityAvailable,
+  deviceRowVisible,
   entityConfigured,
   fireMoreInfo,
   formatPowerNow,
   formatSensorValue,
+  getDeviceStatus,
   getEffectiveTargetLimits,
   getFanMode,
   getHumidityTargetLimits,
@@ -313,11 +314,10 @@ export class RoomClimateControl extends LitElement {
         humidityHighOffsetHelper,
       } = opts;
 
-      if (!entityConfigured(deviceEntity) || !entityAvailable(this.hass, deviceEntity)) {
-        return;
-      }
-      const useState = getStateObj(this.hass, useToggle);
-      if (!useState) return;
+      // An unavailable/unknown device still renders its row with status
+      // "Unavailable" (UX-37); only an entity missing from hass.states is skipped.
+      if (!deviceRowVisible(this.hass, deviceEntity, useToggle)) return;
+      const useState = getStateObj(this.hass, useToggle)!;
 
       const entity = deviceEntity!;
       const targetTemp = getTargetTemp(this.hass, targetHelper);
@@ -333,7 +333,7 @@ export class RoomClimateControl extends LitElement {
         siblingTarget,
         highOffsetHelper ? getTargetTempValue(this.hass, highOffsetHelper) : undefined
       );
-      const mode = modeFn(this.hass, entity);
+      const mode = getDeviceStatus(this.hass, entity, modeFn);
       const adjustTarget = (delta: number) => {
         const next = Math.min(max, Math.max(min, targetTemp + delta));
         if (next !== targetTemp) setInputNumber(this.hass, targetHelper, next);
