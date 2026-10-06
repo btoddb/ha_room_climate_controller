@@ -66,11 +66,12 @@ function climateMapY(kind: "cooling" | "heating"): string {
   ) === "${activeMode}" ? 1 : 0`;
 }
 
+/** Fan/vent on/off: anything but off/unavailable/unknown is On (UX-37). */
 function fanMapY(): string {
-  return `(
+  return `["off", "unavailable", "unknown"].includes(
     (state && state.state) ||
     y
-  ) === "off" ? 0 : 1`;
+  ) ? 0 : 1`;
 }
 
 function deviceTrace(

@@ -82,3 +82,35 @@ describe("buildHistoryGraphConfig vent fan trace (UX-35)", () => {
     assert.equal(evaluate(["unavailable"]), "Kid's Vent: —");
   });
 });
+
+describe("buildHistoryGraphConfig device on/off mapping (UX-37)", () => {
+  function mapY(trace: Record<string, unknown>) {
+    const filters = trace.filters as Array<{ map_y?: string }>;
+    const expr = filters.find((f) => f.map_y)!.map_y!;
+    return new Function("state", "y", `return ${expr}`) as (
+      state: { state: string; attributes?: Record<string, unknown> } | undefined,
+      y: unknown
+    ) => number;
+  }
+
+  const all = traces(makeConfig({ vent_fan_entity: "switch.vent" }));
+  const fan = mapY(all.find((t) => t.entity === "fan.one")!);
+  const vent = mapY(all.find((t) => t.entity === "switch.vent")!);
+  const ac = mapY(all.find((t) => t.entity === "climate.ac")!);
+
+  for (const state of ["off", "unavailable", "unknown"]) {
+    it(`plots a fan/vent/climate device in state ${state} as not on`, () => {
+      assert.equal(fan({ state }, undefined), 0);
+      assert.equal(fan(undefined, state), 0);
+      assert.equal(vent({ state }, undefined), 0);
+      assert.equal(ac({ state, attributes: {} }, undefined), 0);
+    });
+  }
+
+  it("plots a running fan/vent/climate device as on", () => {
+    assert.equal(fan({ state: "on" }, undefined), 1);
+    assert.equal(fan(undefined, "on"), 1);
+    assert.equal(vent({ state: "on" }, undefined), 1);
+    assert.equal(ac({ state: "cool", attributes: {} }, undefined), 1);
+  });
+});

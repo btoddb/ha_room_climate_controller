@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  deviceRowVisible,
+  getDeviceStatus,
   getEffectiveTargetLimits,
+  getFanMode,
   getHumidityTargetLimits,
   getNumberLimits,
+  getHvacMode,
   getTargetTempValue,
   getVentFanMode,
   type TargetTempDevice,
@@ -265,3 +269,86 @@ describe("getVentFanMode", () => {
   });
 });
 
+describe("getDeviceStatus (UX-37)", () => {
+  const FAN = "fan.pedestal";
+  const AC = "climate.ac";
+
+  function deviceHass(
+    entityId: string,
+    state: string,
+    attributes: Record<string, unknown> = {}
+  ): HomeAssistant {
+    return {
+      states: { [entityId]: { entity_id: entityId, state, attributes } },
+    } as unknown as HomeAssistant;
+  }
+
+  for (const state of ["unavailable", "unknown"]) {
+    it(`reads "Unavailable" for a fan in state ${state}, never a stale speed`, () => {
+      const hass = deviceHass(FAN, state, { percentage: 50 });
+      assert.equal(getDeviceStatus(hass, FAN, getFanMode), "Unavailable");
+    });
+
+    it(`reads "Unavailable" for a climate device in state ${state}`, () => {
+      const hass = deviceHass(AC, state);
+      assert.equal(getDeviceStatus(hass, AC, getHvacMode), "Unavailable");
+    });
+
+    it(`reads "Unavailable" for a vent fan in state ${state}`, () => {
+      const hass = deviceHass("switch.vent", state);
+      assert.equal(
+        getDeviceStatus(hass, "switch.vent", (h, id) => getVentFanMode(h, id)),
+        "Unavailable"
+      );
+    });
+  }
+
+  it("passes normal states through to the device's own status", () => {
+    assert.equal(getDeviceStatus(deviceHass(FAN, "off"), FAN, getFanMode), "Off");
+    assert.equal(
+      getDeviceStatus(deviceHass(FAN, "on", { percentage: 50 }), FAN, getFanMode),
+      "50%"
+    );
+    assert.equal(getDeviceStatus(deviceHass(AC, "cool"), AC, getHvacMode), "Cool");
+    assert.equal(
+      getDeviceStatus(deviceHass("switch.vent", "on"), "switch.vent", (h, id) =>
+        getVentFanMode(h, id)
+      ),
+      "On"
+    );
+  });
+});
+
+describe("deviceRowVisible (UX-37)", () => {
+  const FAN = "fan.pedestal";
+  const USE = "switch.use_fan";
+
+  function rowHass(fanState?: string, useExists = true): HomeAssistant {
+    const states: Record<string, unknown> = {};
+    if (fanState !== undefined) {
+      states[FAN] = { entity_id: FAN, state: fanState, attributes: {} };
+    }
+    if (useExists) states[USE] = { entity_id: USE, state: "on", attributes: {} };
+    return { states } as unknown as HomeAssistant;
+  }
+
+  for (const state of ["on", "unavailable", "unknown"]) {
+    it(`shows the row for a device in state ${state}`, () => {
+      assert.equal(deviceRowVisible(rowHass(state), FAN, USE), true);
+    });
+  }
+
+  it("hides the row for an unconfigured device entity", () => {
+    assert.equal(deviceRowVisible(rowHass("on"), undefined, USE), false);
+    assert.equal(deviceRowVisible(rowHass("on"), "  ", USE), false);
+  });
+
+  it("hides the row for a device entity with no state object", () => {
+    assert.equal(deviceRowVisible(rowHass(undefined), FAN, USE), false);
+  });
+
+  it("hides the row when the Use switch has no state object", () => {
+    assert.equal(deviceRowVisible(rowHass("on", false), FAN, USE), false);
+    assert.equal(deviceRowVisible(rowHass("on"), FAN, undefined), false);
+  });
+});
