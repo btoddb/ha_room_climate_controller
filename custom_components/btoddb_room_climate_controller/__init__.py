@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,7 @@ from homeassistant.components.lovelace import LOVELACE_DATA
 from homeassistant.components.lovelace.resources import ResourceStorageCollection
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_call_later
@@ -43,6 +45,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 SERVICE_APPLY_PROFILE = "apply_profile"
 SERVICE_SET_MANUAL_MODE = "set_manual_mode"
+SERVICE_RESUME_CONTROL = "resume_control"
 
 CARD_URL_BASE = "/btoddb_room_climate_controller"
 CARD_FILENAME = "room-climate-control-card.js"
@@ -92,6 +95,30 @@ async def _async_register_card(hass: HomeAssistant) -> None:
     await resources.async_create_item({"res_type": "module", "url": url})
 
 
+def _loaded_entry(hass: HomeAssistant) -> RoomClimateConfigEntry | None:
+    """Return the loaded hub config entry, if any."""
+    return next(
+        (
+            entry
+            for entry in hass.config_entries.async_entries(DOMAIN)
+            if entry.state is ConfigEntryState.LOADED
+        ),
+        None,
+    )
+
+
+@callback
+def _resume_control(hass: HomeAssistant, call: ServiceCall) -> None:
+    """End a room's setpoint holds and vent override now (CC-45)."""
+    room = call.data["room"]
+    entry = _loaded_entry(hass)
+    controller = entry.runtime_data.controllers.get(room) if entry else None
+    if controller is None:
+        msg = f"Unknown room '{room}'"
+        raise ServiceValidationError(msg)
+    controller.async_resume_control("service")
+
+
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Register websocket commands and services (once)."""
     await hass.http.async_register_static_paths(
@@ -106,18 +133,8 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     await _async_register_card(hass)
     websocket_api.async_setup(hass)
 
-    def _loaded_entry() -> RoomClimateConfigEntry | None:
-        return next(
-            (
-                entry
-                for entry in hass.config_entries.async_entries(DOMAIN)
-                if entry.state is ConfigEntryState.LOADED
-            ),
-            None,
-        )
-
     async def _apply_profile(call: ServiceCall) -> None:
-        entry = _loaded_entry()
+        entry = _loaded_entry(hass)
         if entry is None:
             return
         profile = entry.runtime_data.get_profile(
@@ -127,7 +144,7 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
             await async_apply_profile(entry, profile, force=True)
 
     async def _set_manual_mode(call: ServiceCall) -> None:
-        entry = _loaded_entry()
+        entry = _loaded_entry(hass)
         if entry is None:
             return
         room = entry.runtime_data.room_by_key(call.data["room"])
@@ -157,6 +174,12 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
         schema=vol.Schema(
             {vol.Required("room"): cv.string, vol.Required("enabled"): cv.boolean}
         ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_RESUME_CONTROL,
+        partial(_resume_control, hass),
+        schema=vol.Schema({vol.Required("room"): cv.string}),
     )
     return True
 

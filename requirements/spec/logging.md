@@ -21,7 +21,8 @@ a message tag):
 | `custom_components.btoddb_room_climate_controller.capabilities` | CC-L10 capability dumps |
 
 The `RCC commanded` line (CC-L7), the vent fan override lines (CC-L11), the
-setpoint hold lines (CC-L12) and the diagnostic exception logs stay on the base
+setpoint hold lines (CC-L12), the resume control lines (CC-L13) and the
+diagnostic exception logs stay on the base
 `custom_components.btoddb_room_climate_controller.controller` logger — they're
 device-action lines, not settings/sensor/profile events. Example: to see only
 sensor activity, set `custom_components.btoddb_room_climate_controller.sensor: info`
@@ -157,8 +158,9 @@ log is emitted for those transitions.
   change started or restarted an override, CC-38), `vent fan override
   expired` (the override ended and normal rules take over, CC-38), `setpoint
   hold started` (a manual thermostat change started or restarted a hold,
-  CC-41) or `setpoint hold expired` (the hold ended and RCC re-asserts its
-  setpoint, CC-41).
+  CC-41), `setpoint hold expired` (the hold ended and RCC re-asserts its
+  setpoint, CC-41) or `resume control` (an explicit resume via the service or
+  button, CC-45).
 
 Logged by `controller.py` in `_run`, at **INFO**, on the base `controller`
 logger, after the evaluation's commands have all been attempted, using the
@@ -258,6 +260,23 @@ Logged by `controller.py` (`_on_vent_change`, `_vent_override_expired`,
 Logged by `controller.py` (`_on_climate_change`, `_setpoint_hold_expired`,
 `_clear_setpoint_holds`) on the base `controller` logger, and by `notify.py`
 (the notification warning/error).
+
+### Resume control (CC-L13)
+
+- **CC-L13** When Resume control (CC-45) runs, via the service or the room's
+  button:
+  `[room=<key>] Resume control (<source>): cleared <n> setpoint hold(s), vent override <yes|no>`
+  at **INFO** when a setpoint hold or the vent fan override was active, otherwise
+  `[room=<key>] Resume control (<source>): nothing to resume` at **DEBUG**.
+  `<source>` is `service` or `button`. Each hold or override it ends also logs
+  the existing "cleared" line with reason `resume control (<source>)`:
+  `[room=<key>] Setpoint hold cleared: <entity_id>: resume control (<source>)`
+  (CC-L12) and `[room=<key>] Vent fan override cleared: resume control
+  (<source>)` (CC-L11). The evaluation that follows uses trigger
+  `resume control` (CC-L7).
+
+Logged by `controller.py` (`async_resume_control`) on the base `controller`
+logger.
 
 ### Copy/paste room settings (out of scope)
 

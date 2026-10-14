@@ -23,7 +23,8 @@ their controls are **native entities**, and a reactive engine drives your real
   (wall panel, remote, HA app) starts a per-room **setpoint hold** (default 1 h)
   during which the controller leaves that device alone; when the hold ends it
   resumes control, optionally sending a notification through
-  `btoddb_notifications`.
+  `btoddb_notifications`. A hold (or a vent fan manual override) can be ended
+  early with the room's **Resume control** button or service.
 - **Daily profiles.** A profile is a named, scheduled preset for a room (per-device
   target temps + use toggles + fan-only override). At its scheduled time (or via
   "apply now") it copies its presets onto the room's live entities and the
@@ -89,6 +90,7 @@ creates — no hand-made `input_select` helper needed).
 
 - `btoddb_room_climate_controller.apply_profile` `{ profile_id }` — apply a profile's presets now.
 - `btoddb_room_climate_controller.set_manual_mode` `{ room, enabled }` — toggle a room's manual mode.
+- `btoddb_room_climate_controller.resume_control` `{ room }` — end a room's active setpoint holds and vent fan override now and resume automatic control (no notification).
 
 ## Development
 

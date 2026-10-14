@@ -75,6 +75,9 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   /** The heater's setpoint-hold sensor (CC-41, UX-37). In a combined room it is
   the shared A/C sensor. Empty when absent. */
   heater_setpoint_hold?: string;
+  /** The room's "Resume control" button entity (CC-45, UX-38): pressing it
+  ends every active setpoint hold and vent fan override. Empty when absent. */
+  resume_control?: string;
   use_vent_fan: string;
   target_vent_fan: string;
   vent_humidity_target: string;

@@ -35,6 +35,7 @@ from .const import (
     KEY_PROFILE_TIME,
     KEY_PROFILE_USE,
     KEY_PROFILE_VENT_HUMIDITY,
+    KEY_RESUME_CONTROL,
     KEY_ROOM_HUMIDITY,
     KEY_ROOM_POWER,
     KEY_ROOM_TEMPERATURE,
@@ -232,6 +233,14 @@ def _serialize_room(
                     "sensor",
                 )
                 if room.has_heater
+                else None
+            ),
+            # Per-room "Resume control" button (CC-45): ends every setpoint
+            # hold and the vent override at once; null without an A/C, heater
+            # or vent fan.
+            "resume_control": (
+                rr(KEY_RESUME_CONTROL, "button")
+                if room.has_ac or room.has_heater or room.has_vent_fan
                 else None
             ),
             # Per-fan live entities (each fan has its own target/use/reverse/

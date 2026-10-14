@@ -137,6 +137,16 @@
           "description": "Whether manual mode is on."
         }
       }
+    },
+    "resume_control": {
+      "name": "Resume control",
+      "description": "End any active thermostat setpoint hold or vent fan override in a room and resume automatic control immediately. No notification is sent.",
+      "fields": {
+        "room": {
+          "name": "Room",
+          "description": "The room key."
+        }
+      }
     }
   }
 }
