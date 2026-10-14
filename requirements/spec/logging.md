@@ -20,8 +20,8 @@ a message tag):
 | `custom_components.btoddb_room_climate_controller.profile` | CC-L3a–j profile events |
 | `custom_components.btoddb_room_climate_controller.capabilities` | CC-L10 capability dumps |
 
-The `RCC commanded` line (CC-L7), the vent fan override lines (CC-L11) and the
-diagnostic exception logs stay on the base
+The `RCC commanded` line (CC-L7), the vent fan override lines (CC-L11), the
+setpoint hold lines (CC-L12) and the diagnostic exception logs stay on the base
 `custom_components.btoddb_room_climate_controller.controller` logger — they're
 device-action lines, not settings/sensor/profile events. Example: to see only
 sensor activity, set `custom_components.btoddb_room_climate_controller.sensor: info`
@@ -154,8 +154,11 @@ log is emitted for those transitions.
   controller starts, and again after its delayed resubscribe — there is no
   sensor change to attribute it to, but devices may still need commanding to
   reach the desired state), `vent fan override started` (a manual vent fan
-  change started or restarted an override, CC-38) or `vent fan override
-  expired` (the override ended and normal rules take over, CC-38).
+  change started or restarted an override, CC-38), `vent fan override
+  expired` (the override ended and normal rules take over, CC-38), `setpoint
+  hold started` (a manual thermostat change started or restarted a hold,
+  CC-41) or `setpoint hold expired` (the hold ended and RCC re-asserts its
+  setpoint, CC-41).
 
 Logged by `controller.py` in `_run`, at **INFO**, on the base `controller`
 logger, after the evaluation's commands have all been attempted, using the
@@ -228,6 +231,33 @@ raising.
 
 Logged by `controller.py` (`_on_vent_change`, `_vent_override_expired`,
 `_clear_vent_override`) at **INFO** on the base `controller` logger.
+
+### Thermostat setpoint hold (CC-L12)
+
+- **CC-L12** Each change of a room climate entity's target temperature
+  (`temperature` attribute) between two real states is classified (CC-42) and
+  logged:
+  `[room=<key>] Climate <entity_id> setpoint <old>→<new>: <manual|own|automation> (context id=<id> parent_id=<parent_id|None>) — <outcome>`
+  at **INFO** for a manual change, where `<outcome>` is `hold until <HH:MM>`
+  (HA local time) when it starts a hold, `hold restarted until <HH:MM>` when it
+  restarts an active one (CC-41), and `no hold (manual mode)` while Manual Mode
+  is on (CC-43); and at **DEBUG** with outcome `no hold` for `own` and
+  `automation` changes. Transitions from/to `unavailable`/`unknown` and updates
+  that leave the target temperature unchanged (mode-, fan-mode- and
+  current-temperature-only updates) are not logged. With
+  `setpoint_hold_minutes` 0 the climate entities are not listened to, so
+  nothing is logged. When a hold ends:
+  `[room=<key>] Setpoint hold expired: <entity_id>` (followed by an evaluation
+  with trigger `setpoint hold expired`, CC-L7), or
+  `[room=<key>] Setpoint hold cleared: <entity_id>: manual mode` when Manual
+  Mode turns on during a hold (CC-43). For the hold-ended notification
+  (CC-44), a missing `btoddb_notifications.send` service logs
+  `… is not registered; hold-ended notifications are skipped` once at
+  **WARNING**, and a failed send logs at **ERROR** with the exception.
+
+Logged by `controller.py` (`_on_climate_change`, `_setpoint_hold_expired`,
+`_clear_setpoint_holds`) on the base `controller` logger, and by `notify.py`
+(the notification warning/error).
 
 ### Copy/paste room settings (out of scope)
 

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  formatUntilTime,
+  getClimateHoldMode,
   getEffectiveTargetLimits,
   getHumidityTargetLimits,
   getNumberLimits,
@@ -265,3 +267,80 @@ describe("getVentFanMode", () => {
   });
 });
 
+describe("formatUntilTime", () => {
+  it("formats an ISO timestamp as browser-local h:mm AM/PM", () => {
+    assert.equal(formatUntilTime(new Date(2026, 9, 3, 15, 42).toISOString()), "3:42 PM");
+    assert.equal(formatUntilTime(new Date(2026, 9, 4, 0, 5).toISOString()), "12:05 AM");
+  });
+
+  it("returns undefined for missing, empty, non-string, or unparseable values", () => {
+    for (const until of [undefined, null, "", 42, "not-a-date"]) {
+      assert.equal(formatUntilTime(until), undefined);
+    }
+  });
+});
+
+describe("getClimateHoldMode", () => {
+  const AC = "climate.ac";
+  const HOLD = "sensor.ac_setpoint_hold";
+  // 3:42 PM browser-local, serialized to a UTC ISO string like the backend's
+  // `until` attribute, so assertions hold in any test-machine timezone.
+  const UNTIL = new Date(2026, 9, 3, 15, 42).toISOString();
+
+  function climateHass(
+    hvacState: string | undefined,
+    hold?: { state: string; until?: string | null }
+  ): HomeAssistant {
+    const states: Record<string, unknown> = {};
+    if (hvacState !== undefined) {
+      states[AC] = { entity_id: AC, state: hvacState, attributes: {} };
+    }
+    if (hold) {
+      states[HOLD] = {
+        entity_id: HOLD,
+        state: hold.state,
+        attributes: { until: hold.until ?? null },
+      };
+    }
+    return { states } as HomeAssistant;
+  }
+
+  it("shows the plain mode when there is no hold entity id", () => {
+    const hass = climateHass("cool", { state: "active", until: UNTIL });
+    assert.equal(getClimateHoldMode(hass, AC), "Cool");
+    assert.equal(getClimateHoldMode(hass, AC, ""), "Cool");
+  });
+
+  it("shows the plain mode when the hold sensor reads none", () => {
+    assert.equal(getClimateHoldMode(climateHass("cool", { state: "none" }), AC, HOLD), "Cool");
+  });
+
+  it("appends the hold end time while a hold is active", () => {
+    const hass = climateHass("cool", { state: "active", until: UNTIL });
+    assert.equal(getClimateHoldMode(hass, AC, HOLD), "Cool · hold until 3:42 PM");
+  });
+
+  it("ignores an active hold with a null or unparseable until", () => {
+    assert.equal(
+      getClimateHoldMode(climateHass("heat", { state: "active", until: null }), AC, HOLD),
+      "Heat"
+    );
+    assert.equal(
+      getClimateHoldMode(climateHass("heat", { state: "active", until: "not-a-date" }), AC, HOLD),
+      "Heat"
+    );
+  });
+
+  it("treats an unavailable, unknown, or missing hold sensor as no hold", () => {
+    for (const state of ["unavailable", "unknown"]) {
+      const hass = climateHass("cool", { state, until: UNTIL });
+      assert.equal(getClimateHoldMode(hass, AC, HOLD), "Cool");
+    }
+    assert.equal(getClimateHoldMode(climateHass("cool"), AC, HOLD), "Cool");
+  });
+
+  it("stays — when the climate entity is missing", () => {
+    const hold = { state: "active", until: UNTIL };
+    assert.equal(getClimateHoldMode(climateHass(undefined, hold), AC, HOLD), "—");
+  });
+});

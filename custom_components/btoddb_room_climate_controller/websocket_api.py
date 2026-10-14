@@ -21,8 +21,10 @@ from .const import (
     DEVICE_VENT,
     DOMAIN,
     KEY_AC_FAN_ONLY,
+    KEY_AC_SETPOINT_HOLD,
     KEY_GRAPH_TIME_RANGE,
     KEY_HEATER_FAN_ONLY,
+    KEY_HEATER_SETPOINT_HOLD,
     KEY_HIGH_OFFSET,
     KEY_MANUAL_MODE,
     KEY_MEDIUM_OFFSET,
@@ -217,6 +219,20 @@ def _serialize_room(
             # an ISO `until` attribute; null without a vent fan.
             "vent_fan_override": (
                 rr(KEY_VENT_OVERRIDE, "sensor") if room.has_vent_fan else None
+            ),
+            # Thermostat setpoint hold status sensors (CC-43): none/active with
+            # `until` (ISO) and `setpoint` attributes. A combined heat pump has
+            # one hold sensor (the "ac" role), so both keys resolve to it.
+            "ac_setpoint_hold": (
+                rr(KEY_AC_SETPOINT_HOLD, "sensor") if room.has_ac else None
+            ),
+            "heater_setpoint_hold": (
+                rr(
+                    KEY_AC_SETPOINT_HOLD if room.combined else KEY_HEATER_SETPOINT_HOLD,
+                    "sensor",
+                )
+                if room.has_heater
+                else None
             ),
             # Per-fan live entities (each fan has its own target/use/reverse/
             # humidity target); the fan-speed offsets below are shared across

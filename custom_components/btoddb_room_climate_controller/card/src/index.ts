@@ -12,7 +12,7 @@ window.customCards.push({
 });
 
 console.info(
-  "%c ROOM-CLIMATE-CONTROL %c v1.4.116 ",
+  "%c ROOM-CLIMATE-CONTROL %c v1.4.117 ",
   "color: white; background: #0288d1; font-weight: 700;",
   "color: #0288d1; background: white; font-weight: 700;"
 );

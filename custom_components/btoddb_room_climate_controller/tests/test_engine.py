@@ -51,6 +51,7 @@ from rc_pure.engine import (  # noqa: E402
     SwitchInfo,
     SwitchTurnOff,
     SwitchTurnOn,
+    TurnOffClimate,
     VentFanControl,
     any_window_open,
     clamp_setpoint,
@@ -166,6 +167,7 @@ def _climate(
     last_commanded_setpoint=None,
     last_commanded_hvac_mode=None,
     entity_id="climate.ac",
+    held=False,
 ):
     return ClimateInfo(
         entity_id=entity_id,
@@ -179,6 +181,7 @@ def _climate(
         current_setpoint=current_setpoint,
         last_commanded_setpoint=last_commanded_setpoint,
         last_commanded_hvac_mode=last_commanded_hvac_mode,
+        held=held,
     )
 
 
@@ -2661,3 +2664,153 @@ def test_vent_fan_override_none_leaves_rules_unchanged():
     assert compute_commands(
         _base(vent_fan=_vent(use=True, target=72.0, override=None), room_temp=90.0)
     ) == [SwitchTurnOn("switch.vent")]
+
+
+# --- thermostat setpoint hold (CC-41) ----------------------------------------
+_CLIMATE_CMDS = (SetHvacMode, SetTemperature, SetFanMode, TurnOffClimate)
+
+
+def _for(cmds, *entity_ids):
+    """Commands addressed to any of ``entity_ids`` (Delay has no entity)."""
+    return [c for c in cmds if getattr(c, "entity_id", None) in entity_ids]
+
+
+def test_held_split_ac_left_alone_while_other_devices_run():
+    """CC-41: a held A/C and its power switch get nothing; fans/vent still run."""
+    cmds = compute_commands(
+        _base(
+            ac=_climate(hvac="off", fan_modes=("low", "high"), held=True),
+            ac_power=SwitchInfo("switch.ac_power", is_on=False),
+            fans=(_fan_control("fan.tower", use=True),),
+            vent_fan=_vent(use=True, target=72.0),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert _for(cmds, "climate.ac", "switch.ac_power") == []
+    assert FanTurnOn("fan.tower") in cmds
+    assert SwitchTurnOn("switch.vent") in cmds
+
+
+def test_held_split_ac_companion_fan_still_follows_decision():
+    """CC-41: the companion fan entity is still driven; the climate never is."""
+
+    def companion(*, is_on):
+        return FanInfo(
+            "fan.companion",
+            is_on=is_on,
+            preset_mode=None,
+            percentage=100 if is_on else 0,
+            preset_modes=(),
+        )
+
+    cooling = compute_commands(
+        _base(
+            ac=_climate(hvac="off", fan_modes=("low", "high"), held=True),
+            ac_fan=companion(is_on=False),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert not any(isinstance(c, _CLIMATE_CMDS) for c in cooling)
+    assert FanTurnOn("fan.companion") in cooling
+    assert FanSetPercentage("fan.companion", 100) in cooling
+
+    off = compute_commands(
+        _base(
+            ac=_climate(hvac="cool", fan_modes=("low", "high"), held=True),
+            ac_fan=companion(is_on=True),
+            use_ac=False,
+            room_temp=80.0,
+        )
+    )
+    assert off == [FanTurnOff("fan.companion")]
+
+
+def test_held_heater_left_alone_while_ac_still_driven():
+    """CC-41: holds are per entity — an un-held A/C keeps being commanded."""
+    cmds = compute_commands(
+        _base(
+            ac=_climate(hvac="off"),
+            heater=_climate(
+                entity_id="climate.heater",
+                hvac="heat",
+                hvac_modes=("off", "heat"),
+                fan_modes=("low", "high"),
+                held=True,
+            ),
+            heater_power=SwitchInfo("switch.heater_power", is_on=True),
+            use_ac=True,
+            use_heater=False,
+            room_temp=80.0,
+        )
+    )
+    assert _for(cmds, "climate.heater", "switch.heater_power") == []
+    assert SetHvacMode("climate.ac", "cool") in cmds
+    assert any(isinstance(c, SetTemperature) for c in _for(cmds, "climate.ac"))
+
+
+def test_held_combined_heat_pump_gets_nothing():
+    """CC-41: a held combined heat pump (and its power) is left entirely alone."""
+    inputs = {
+        "combined": True,
+        "ac": _climate(
+            hvac="off",
+            hvac_modes=("off", "cool", "heat"),
+            fan_modes=("low", "high"),
+            held=True,
+        ),
+        "ac_power": SwitchInfo("switch.ac_power", is_on=False),
+        "use_ac": True,
+        "use_heater": True,
+        "room_temp": 60.0,
+    }
+    assert compute_commands(_base(**inputs)) == []
+
+    with_fan = compute_commands(
+        _base(**inputs, fans=(_fan_control("fan.tower", use=True, target=50.0),))
+    )
+    assert _for(with_fan, "climate.ac", "switch.ac_power") == []
+    assert FanTurnOn("fan.tower") in with_fan
+
+
+def test_held_ac_power_switch_not_turned_off():
+    """CC-41: a held A/C's power switch is not switched off at decision OFF."""
+    held = compute_commands(
+        _base(
+            ac=_climate(hvac="cool", held=True),
+            ac_power=SwitchInfo("switch.ac_power", is_on=True),
+            use_ac=False,
+        )
+    )
+    assert held == []
+
+    # The same state un-held is turned off as usual.
+    unheld = compute_commands(
+        _base(
+            ac=_climate(hvac="cool", held=False),
+            ac_power=SwitchInfo("switch.ac_power", is_on=True),
+            use_ac=False,
+        )
+    )
+    assert SetHvacMode("climate.ac", "off") in unheld
+    assert TurnOffClimate("climate.ac") in unheld
+    assert unheld[-1] == SwitchTurnOff("switch.ac_power")
+
+
+def test_unheld_split_ac_unchanged():
+    """CC-41: held=False is the default and leaves the normal commands intact."""
+    explicit = compute_commands(
+        _base(
+            ac=_climate(fan_modes=("low", "medium", "high"), held=False),
+            use_ac=True,
+            room_temp=80.0,
+        )
+    )
+    assert _types(explicit) == [
+        "SetHvacMode",
+        "Delay",
+        "SetTemperature",
+        "Delay",
+        "SetFanMode",
+    ]

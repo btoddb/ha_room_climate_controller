@@ -53,6 +53,24 @@ export function getHvacMode(hass: HomeAssistant, entityId: string): string {
   return raw.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/** Cooling/Heating row status (UX-37): the plain `getHvacMode` status, plus
+`· hold until <h:mm AM/PM>` (browser-local time) while the device's setpoint
+hold sensor (CC-41) reads "active" with a valid `until` timestamp. A missing,
+unavailable, unknown, or "none" sensor reads as no hold; a "—" status stays "—". */
+export function getClimateHoldMode(
+  hass: HomeAssistant,
+  entityId: string,
+  holdEntityId?: string
+): string {
+  const base = getHvacMode(hass, entityId);
+  if (base === "—" || !entityConfigured(holdEntityId)) return base;
+  const hold = hass.states[holdEntityId!];
+  if (!hold || hold.state !== "active") return base;
+  const t = formatUntilTime(hold.attributes.until);
+  if (t === undefined) return base;
+  return `${base} · hold until ${t}`;
+}
+
 export function getFanMode(
   hass: HomeAssistant,
   entityId: string,
@@ -185,12 +203,19 @@ export function getVentFanMode(
   if (base === "Unavailable" || !entityConfigured(overrideEntityId)) return base;
   const override = hass.states[overrideEntityId!];
   if (!override || (override.state !== "on" && override.state !== "off")) return base;
-  const until = override.attributes.until;
-  if (typeof until !== "string" || !until) return base;
-  const end = new Date(until);
-  if (Number.isNaN(end.getTime())) return base;
-  const t = formatTime12h(`${end.getHours()}:${end.getMinutes()}`);
+  const t = formatUntilTime(override.attributes.until);
+  if (t === undefined) return base;
   return `${base} · override until ${t}`;
+}
+
+/** Format a backend `until` ISO timestamp as browser-local `h:mm AM/PM` for the
+override/hold status suffixes (UX-36, UX-37). Undefined when the value is
+missing, empty, not a string, or unparseable. */
+export function formatUntilTime(until: unknown): string | undefined {
+  if (typeof until !== "string" || !until) return undefined;
+  const end = new Date(until);
+  if (Number.isNaN(end.getTime())) return undefined;
+  return formatTime12h(`${end.getHours()}:${end.getMinutes()}`);
 }
 
 /** Set a number value on `number.*` or legacy `input_number.*` (domain-aware). */

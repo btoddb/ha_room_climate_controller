@@ -38,10 +38,12 @@ from .const import (
     CONF_HUMIDITY_SENSOR,
     CONF_LABEL,
     CONF_LIMITS,
+    CONF_NOTIFY_ON_HOLD_END,
     CONF_OUTDOOR_SENSOR,
     CONF_POWER_ON_DELAY,
     CONF_POWER_SENSOR,
     CONF_ROOM_KEY,
+    CONF_SETPOINT_HOLD_MINUTES,
     CONF_TEMPERATURE_SENSOR,
     CONF_VENT_FAN_ENTITY,
     CONF_WINDOW_SENSORS,
@@ -54,6 +56,8 @@ from .const import (
     DEVICE_VENT,
     DOMAIN,
     LOGGER_CAPABILITIES,
+    SETPOINT_HOLD_MINUTES_MAX,
+    SETPOINT_HOLD_MINUTES_MIN,
     SETPOINT_OFFSET_MAX,
     SETPOINT_OFFSET_MIN,
     SUBENTRY_TYPE_ROOM,
@@ -135,6 +139,18 @@ def _offset_number() -> Any:
     return selector.NumberSelector(
         selector.NumberSelectorConfig(
             min=SETPOINT_OFFSET_MIN, max=SETPOINT_OFFSET_MAX, step=1, mode="box"
+        )
+    )
+
+
+def _hold_minutes_number() -> Any:
+    """CC-41: NumberSelector for the per-room setpoint hold duration (minutes)."""
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=SETPOINT_HOLD_MINUTES_MIN,
+            max=SETPOINT_HOLD_MINUTES_MAX,
+            step=1,
+            mode="box",
         )
     )
 
@@ -461,6 +477,22 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
             # *decision* (Heat), not the entity, so it still needs this field.
             fields += [
                 (vol.Optional(CONF_HEATER_SETPOINT_OFFSET), _offset_number()),
+            ]
+        if self._data.get(CONF_HAS_AC) or self._data.get(CONF_HAS_HEATER):
+            # CC-41: a blank hold duration is saved as None and read as the
+            # default by models; an explicit 0 (holds disabled) is kept.
+            fields += [
+                (vol.Optional(CONF_SETPOINT_HOLD_MINUTES), _hold_minutes_number()),
+            ]
+        if (
+            self._data.get(CONF_HAS_AC)
+            or self._data.get(CONF_HAS_HEATER)
+            or self._data.get(CONF_HAS_VENT_FAN)
+        ):
+            # CC-44: also gates the vent fan override notification (CC-38), so
+            # a vent-only room needs it too.
+            fields += [
+                (vol.Required(CONF_NOTIFY_ON_HOLD_END, default=True), _BOOL),
             ]
         if self._data.get(CONF_HAS_FAN):
             fields += [

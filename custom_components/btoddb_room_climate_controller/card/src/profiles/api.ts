@@ -113,6 +113,11 @@ export interface WsRoom {
     `until`; CC-38), or null when there's no vent fan. Older backends omit it,
     so readers must treat a missing value as none. */
     vent_fan_override: string | null;
+    /** The A/C / heater setpoint-hold sensors (state active/none, attribute
+    `until`; CC-41), or null when the device is absent. Older backends omit
+    them, so readers must treat a missing value as no hold. */
+    ac_setpoint_hold: string | null;
+    heater_setpoint_hold: string | null;
     window_sensors: string[];
     /** "cooling"/"heating"/"vent_fan" — the "fan" key moved to `fans`. */
     live: Record<string, WsRoomLive>;

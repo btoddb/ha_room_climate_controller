@@ -132,6 +132,55 @@ def test_room_from_subentry_parses_setpoint_offsets():
     assert ignored.ac_setpoint_offset == 2
 
 
+def test_room_from_subentry_parses_setpoint_hold_settings():
+    """
+    CC-41/CC-44: hold minutes and notify flag parse like the CC-35 offsets.
+
+    Absent/blank fall back to 60 minutes; an explicit 0 (hold disabled) must
+    survive, so the parse uses an is-None/empty check, not truthiness.
+    """
+    base = {"room_key": "office"}
+    absent = models.Room.from_subentry("sub1", base)
+    empty = models.Room.from_subentry("sub1", {**base, "setpoint_hold_minutes": ""})
+    zero = models.Room.from_subentry("sub1", {**base, "setpoint_hold_minutes": 0.0})
+    day = models.Room.from_subentry("sub1", {**base, "setpoint_hold_minutes": 1440.0})
+    no_notify = models.Room.from_subentry("sub1", {**base, "notify_on_hold_end": False})
+
+    assert absent.setpoint_hold_minutes == 60
+    assert absent.notify_on_hold_end is True
+    assert empty.setpoint_hold_minutes == 60
+    assert zero.setpoint_hold_minutes == 0
+    assert day.setpoint_hold_minutes == 1440
+    assert no_notify.notify_on_hold_end is False
+
+
+def test_describe_room_settings_includes_hold_settings():
+    """CC-L5: hold minutes for A/C or heater rooms; notify also for vent rooms."""
+    described = models.describe_room_settings(
+        _room(setpoint_hold_minutes=30, notify_on_hold_end=False)
+    )
+    assert "setpoint_hold_minutes=30" in described
+    assert "notify_on_hold_end=False" in described
+
+    fan_only = models.describe_room_settings(_room(has_ac=False, ac_climate=None))
+    assert "setpoint_hold_minutes" not in fan_only
+    assert "notify_on_hold_end" not in fan_only
+
+    vent_only = models.describe_room_settings(
+        _room(
+            has_ac=False,
+            ac_climate=None,
+            has_fan=False,
+            fan_entities=(),
+            has_vent_fan=True,
+            vent_fan_entity="fan.office_vent",
+            limits={"vent_fan": {"min": 60.0, "max": 86.0}},
+        )
+    )
+    assert "setpoint_hold_minutes" not in vent_only
+    assert "notify_on_hold_end=True" in vent_only
+
+
 def test_describe_command_maps_each_command_to_a_phrase():
     room = _room()
     cases = [
@@ -311,7 +360,7 @@ class _StubServices:
         self.calls: list[tuple[str, str, dict]] = []
         self._raise_on = raise_on or set()
 
-    async def async_call(self, domain, service, data, blocking=True):  # noqa: ARG002
+    async def async_call(self, domain, service, data, blocking=True, context=None):  # noqa: ARG002
         self.calls.append((domain, service, data))
         if (domain, service) in self._raise_on:
             msg = f"simulated failure: {domain}.{service}"
