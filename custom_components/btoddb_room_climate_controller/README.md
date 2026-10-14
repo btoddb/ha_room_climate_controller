@@ -19,6 +19,11 @@ their controls are **native entities**, and a reactive engine drives your real
   is a second fan trigger: give the room a humidity sensor and a fan and it also
   gets a humidity target (%) plus medium/high offsets, so the fans run — and pick
   their speed — when the room is too damp as well as too warm.
+- **Thermostat setpoint hold.** Changing a thermostat's target temperature by hand
+  (wall panel, remote, HA app) starts a per-room **setpoint hold** (default 1 h)
+  during which the controller leaves that device alone; when the hold ends it
+  resumes control, optionally sending a notification through
+  `btoddb_notifications`.
 - **Daily profiles.** A profile is a named, scheduled preset for a room (per-device
   target temps + use toggles + fan-only override). At its scheduled time (or via
   "apply now") it copies its presets onto the room's live entities and the

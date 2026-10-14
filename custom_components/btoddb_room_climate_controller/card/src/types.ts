@@ -69,6 +69,12 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   vent_fan_entity?: string;
   /** The vent fan's manual-override sensor (CC-38, UX-36). Empty when absent. */
   vent_fan_override?: string;
+  /** The A/C's setpoint-hold sensor (CC-41, UX-37): state "active"/"none",
+  attribute `until`. Empty when absent. */
+  ac_setpoint_hold?: string;
+  /** The heater's setpoint-hold sensor (CC-41, UX-37). In a combined room it is
+  the shared A/C sensor. Empty when absent. */
+  heater_setpoint_hold?: string;
   use_vent_fan: string;
   target_vent_fan: string;
   vent_humidity_target: string;

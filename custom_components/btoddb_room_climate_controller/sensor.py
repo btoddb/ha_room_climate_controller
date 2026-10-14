@@ -6,7 +6,9 @@ dashboards) reference a stable ``sensor.<room>_room_*`` entity even if the
 underlying device sensor is swapped out later. A single hub-level
 ``Outdoor Temperature`` mirror does the same for the outdoor source, so graphs
 can re-point the real weather sensor in one place. Rooms with a vent fan also
-get a ``Vent fan override`` status sensor (CC-40), fed by the controller.
+get a ``Vent fan override`` status sensor (CC-40), and rooms with an A/C and/or
+heater get ``A/C setpoint hold`` / ``Heater setpoint hold`` status sensors
+(CC-43), all fed by the controller.
 """
 
 from __future__ import annotations
@@ -28,11 +30,14 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
     CONF_OUTDOOR_SENSOR,
+    KEY_AC_SETPOINT_HOLD,
+    KEY_HEATER_SETPOINT_HOLD,
     KEY_OUTDOOR_TEMPERATURE,
     KEY_ROOM_HUMIDITY,
     KEY_ROOM_POWER,
     KEY_ROOM_TEMPERATURE,
     KEY_VENT_OVERRIDE,
+    SIGNAL_SETPOINT_HOLD,
     SIGNAL_VENT_OVERRIDE,
 )
 from .entity import hub_identifier, room_device_info
@@ -116,6 +121,15 @@ async def async_setup_entry(
                 [VentOverrideSensor(entry, room)],
                 config_subentry_id=room.room_id,
             )
+        # CC-43: one hold sensor per driven climate entity; a combined heat
+        # pump's single entity is reported under the "ac" role.
+        hold_sensors = []
+        if room.has_ac and room.ac_climate:
+            hold_sensors.append(SetpointHoldSensor(entry, room, "ac"))
+        if room.has_heater and not room.combined and room.heater_climate:
+            hold_sensors.append(SetpointHoldSensor(entry, room, "heater"))
+        if hold_sensors:
+            async_add_entities(hold_sensors, config_subentry_id=room.room_id)
 
     outdoor_source = entry.data.get(CONF_OUTDOOR_SENSOR)
     if outdoor_source:
@@ -226,5 +240,51 @@ class VentOverrideSensor(SensorEntity):
         self._attr_native_value = state
         self._attr_extra_state_attributes = {
             "until": until.isoformat() if until else None
+        }
+        self.async_write_ha_state()
+
+
+class SetpointHoldSensor(SensorEntity):
+    """
+    A climate entity's thermostat setpoint hold status (CC-43): ``none``/``active``.
+
+    Fed by the room controller over a per-room, per-role dispatcher signal.
+    Attributes: ``until`` (ISO timestamp) and ``setpoint`` (the device setpoint
+    that started the hold), both None when no hold is active. Not restored:
+    the hold is in-memory, so after a restart it is ``none``.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:thermostat"
+    _attr_device_class = SensorDeviceClass.ENUM
+
+    def __init__(self, entry: RoomClimateConfigEntry, room: Room, role: str) -> None:
+        """Initialize the status sensor for role "ac" or "heater"."""
+        key = KEY_AC_SETPOINT_HOLD if role == "ac" else KEY_HEATER_SETPOINT_HOLD
+        self._attr_name = (
+            "A/C setpoint hold" if role == "ac" else "Heater setpoint hold"
+        )
+        self._attr_options = ["none", "active"]
+        self._signal = f"{SIGNAL_SETPOINT_HOLD}_{entry.entry_id}_{room.key}_{role}"
+        self._attr_unique_id = room_uid(entry.entry_id, room.key, key)
+        self._attr_device_info = room_device_info(entry, room)
+        self._attr_native_value = "none"
+        self._attr_extra_state_attributes = {"until": None, "setpoint": None}
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the controller's hold updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, self._signal, self._handle_hold)
+        )
+
+    @callback
+    def _handle_hold(
+        self, state: str, until: datetime | None, setpoint: float | None
+    ) -> None:
+        self._attr_native_value = state
+        self._attr_extra_state_attributes = {
+            "until": until.isoformat() if until else None,
+            "setpoint": setpoint,
         }
         self.async_write_ha_state()

@@ -37,9 +37,11 @@ from .const import (
     CONF_HUMIDITY_SENSOR,
     CONF_LABEL,
     CONF_LIMITS,
+    CONF_NOTIFY_ON_HOLD_END,
     CONF_POWER_ON_DELAY,
     CONF_POWER_SENSOR,
     CONF_ROOM_KEY,
+    CONF_SETPOINT_HOLD_MINUTES,
     CONF_TEMPERATURE_SENSOR,
     CONF_VENT_FAN_ENTITY,
     CONF_WINDOW_SENSORS,
@@ -47,6 +49,7 @@ from .const import (
     DEFAULT_HUMIDITY_TARGET,
     DEFAULT_LIMITS,
     DEFAULT_POWER_ON_DELAY,
+    DEFAULT_SETPOINT_HOLD_MINUTES,
     DEFAULT_SETPOINT_OFFSET,
     DEVICE_COOLING,
     DEVICE_FAN,
@@ -190,6 +193,16 @@ def _parse_offset(raw: Any) -> int:
     return DEFAULT_SETPOINT_OFFSET if raw is None or raw == "" else int(raw)
 
 
+def _parse_hold_minutes(raw: Any) -> int:
+    """
+    Parse the CC-41 setpoint-hold duration, defaulting unset/blank to 60.
+
+    Same explicit-None/empty check as ``_parse_offset``: ``0`` disables the
+    hold and must survive.
+    """
+    return DEFAULT_SETPOINT_HOLD_MINUTES if raw is None or raw == "" else int(raw)
+
+
 def _coerce_fan_entities(data: Mapping[str, Any]) -> tuple[str, ...]:
     raw = data.get(CONF_FAN_ENTITIES)
     if raw is None:
@@ -236,6 +249,10 @@ class Room:
     ac_setpoint_offset: int
     has_vent_fan: bool = False
     vent_fan_entity: str | None = None
+    # CC-41/CC-44: minutes a manual thermostat setpoint change pauses control
+    # of that climate entity (0 disables), and whether its end is notified.
+    setpoint_hold_minutes: int = DEFAULT_SETPOINT_HOLD_MINUTES
+    notify_on_hold_end: bool = True
 
     @classmethod
     def from_subentry(cls, subentry_id: str, data: Mapping[str, Any]) -> Room:
@@ -287,6 +304,10 @@ class Room:
             ac_setpoint_offset=_parse_offset(data.get(CONF_AC_SETPOINT_OFFSET)),
             has_vent_fan=bool(data.get(CONF_HAS_VENT_FAN, False)),
             vent_fan_entity=data.get(CONF_VENT_FAN_ENTITY) or None,
+            setpoint_hold_minutes=_parse_hold_minutes(
+                data.get(CONF_SETPOINT_HOLD_MINUTES)
+            ),
+            notify_on_hold_end=bool(data.get(CONF_NOTIFY_ON_HOLD_END, True)),
         )
 
     def supports(self, device: str) -> bool:
@@ -346,6 +367,10 @@ def describe_room_settings(room: Room) -> str:
         parts.append(f"fan_entities={list(room.fan_entities)}")
     if room.has_vent_fan:
         parts.append(f"vent_fan_entity={room.vent_fan_entity}")
+    if room.has_ac or room.has_heater:
+        parts.append(f"setpoint_hold_minutes={room.setpoint_hold_minutes}")
+    if room.has_ac or room.has_heater or room.has_vent_fan:
+        parts.append(f"notify_on_hold_end={room.notify_on_hold_end}")
     parts.append(f"temperature_sensor={room.temperature_sensor}")
     if room.humidity_sensor:
         parts.append(f"humidity_sensor={room.humidity_sensor}")

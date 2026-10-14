@@ -41,6 +41,10 @@ SIGNAL_REMOVE_PROFILE: Final = f"{DOMAIN}_remove_profile"
 # Vent fan manual-override status (CC-38/CC-40), sent per room as
 # f"{SIGNAL_VENT_OVERRIDE}_{entry_id}_{room_key}" with (state, until).
 SIGNAL_VENT_OVERRIDE: Final = f"{DOMAIN}_vent_override"
+# Thermostat setpoint hold status (CC-41/CC-43), sent per room and role as
+# f"{SIGNAL_SETPOINT_HOLD}_{entry_id}_{room_key}_{role}" (role "ac"/"heater")
+# with (state, until, setpoint).
+SIGNAL_SETPOINT_HOLD: Final = f"{DOMAIN}_setpoint_hold"
 
 # --- Device types (cooling / heating / fan / vent fan) -----------------------
 DEVICE_COOLING: Final = "cooling"
@@ -118,6 +122,20 @@ CONF_LIMITS: Final = "limits"
 CONF_COMMAND_DELAY: Final = "command_delay_seconds"
 CONF_POWER_ON_DELAY: Final = "power_on_delay_seconds"
 
+# Thermostat setpoint hold (CC-41/CC-44): how long a manual change to a climate
+# entity's setpoint pauses the controller for that device (0 disables the
+# hold), and whether a notification is sent when a hold ends.
+CONF_SETPOINT_HOLD_MINUTES: Final = "setpoint_hold_minutes"
+CONF_NOTIFY_ON_HOLD_END: Final = "notify_on_hold_end"
+DEFAULT_SETPOINT_HOLD_MINUTES: Final = 60
+SETPOINT_HOLD_MINUTES_MIN: Final = 0
+SETPOINT_HOLD_MINUTES_MAX: Final = 1440
+
+# Hold-ended notifications go through the companion btoddb_notifications
+# integration (CC-44); skipped when that service is not registered.
+NOTIFY_DOMAIN: Final = "btoddb_notifications"
+NOTIFY_SERVICE: Final = "send"
+
 DEFAULT_COMMAND_DELAY: Final = 2
 DEFAULT_POWER_ON_DELAY: Final = 3
 
@@ -163,6 +181,9 @@ DEFAULT_HUMIDITY_HIGH_OFFSET: Final = 10
 # matching state change still counts as that command's echo.
 VENT_OVERRIDE_SECONDS: Final = 20 * 60
 VENT_ECHO_WINDOW_SECONDS: Final = 10
+# CC-42: how long after the controller's own setpoint command a context-less
+# climate update near the commanded value still counts as that command's echo.
+SETPOINT_ECHO_WINDOW_SECONDS: Final = 10
 
 # --- Room entity keys (unique_id / object_id suffixes) ----------------------
 # Shared by entity creation and the controller's entity-registry resolution.
@@ -205,6 +226,9 @@ KEY_HUMIDITY_HIGH_OFFSET: Final = "humidity_high_offset"
 KEY_VENT_HUMIDITY_TARGET: Final = "vent_fan_humidity_target"
 # Vent fan manual-override status sensor (CC-40), only with a vent fan.
 KEY_VENT_OVERRIDE: Final = "vent_fan_override"
+# Thermostat setpoint hold status sensors (CC-43), one per held climate role.
+KEY_AC_SETPOINT_HOLD: Final = "ac_setpoint_hold"
+KEY_HEATER_SETPOINT_HOLD: Final = "heater_setpoint_hold"
 KEY_MANUAL_MODE: Final = "manual_mode"
 KEY_AC_FAN_ONLY: Final = "ac_fan_only_override"
 KEY_HEATER_FAN_ONLY: Final = "heater_fan_only_override"

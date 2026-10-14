@@ -5,7 +5,8 @@ Same approach as ``test_vent_fan_control.py``: ``controller.py`` imports
 directly (Home Assistant is installed in this devcontainer), ``_resolve`` is
 monkeypatched to bypass the entity registry, and ``hass`` is a tiny stand-in.
 No live event loop: ``async_call_later`` is replaced with a recorder, and
-``_publish_vent_override`` / ``async_request_run`` are patched per test.
+``_publish_vent_override`` / ``async_request_run`` / ``_notify`` are patched
+per test.
 """
 
 import asyncio
@@ -158,8 +159,8 @@ def timers(monkeypatch):
 
 @pytest.fixture
 def hooks():
-    """Record ``_publish_vent_override`` and ``async_request_run`` calls."""
-    return {"published": [], "runs": []}
+    """Record ``_publish_vent_override``, ``async_request_run`` and ``_notify``."""
+    return {"published": [], "runs": [], "notified": []}
 
 
 def _wire(controller, hooks):
@@ -173,6 +174,9 @@ def _wire(controller, hooks):
     controller._publish_vent_override = publish
     controller.async_request_run = lambda trigger="evaluation": hooks["runs"].append(
         trigger
+    )
+    controller._notify = lambda device, message: hooks["notified"].append(
+        (device, message)
     )
     return controller
 
@@ -301,6 +305,10 @@ def test_override_expiry_reverts_to_rules(timers, hooks):
     assert controller._unsub_vent_timer is None
     assert hooks["published"][-1] == ("none", None)
     assert hooks["runs"][-1] == "vent fan override expired"
+    # CC-44: the timed-out override is announced.
+    assert hooks["notified"] == [
+        ("vent_fan", "Vent fan override ended — resuming climate control.")
+    ]
     vent = controller._vent_fan_control(controller.room)
     assert vent is not None
     assert vent.override is None
@@ -352,6 +360,8 @@ def test_manual_mode_clears_active_override(timers, hooks, caplog):
     assert any(
         "Vent fan override cleared: manual mode" in r.message for r in caplog.records
     )
+    # CC-44: only a timed-out override is announced, never a Manual Mode clear.
+    assert hooks["notified"] == []
 
 
 def test_async_stop_cancels_timer_and_vent_listener(timers, hooks):

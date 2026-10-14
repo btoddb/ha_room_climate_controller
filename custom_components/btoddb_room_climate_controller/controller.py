@@ -7,6 +7,7 @@ import logging
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING
 
 from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
@@ -39,11 +40,14 @@ from .const import (
     KEY_VENT_HUMIDITY_TARGET,
     LOGGER_CAPABILITIES,
     LOGGER_SENSOR,
+    SETPOINT_ECHO_WINDOW_SECONDS,
+    SIGNAL_SETPOINT_HOLD,
     SIGNAL_VENT_OVERRIDE,
     VENT_ECHO_WINDOW_SECONDS,
     VENT_OVERRIDE_SECONDS,
 )
 from .engine import (
+    SETPOINT_TOLERANCE,
     ClimateInfo,
     Command,
     Delay,
@@ -84,6 +88,7 @@ from .models import (
     fan_use_key,
     room_uid,
 )
+from .notify import async_send_hold_ended
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -304,6 +309,59 @@ def _classify_vent_change(
     return "manual"
 
 
+def _setpoint_of(state: State | None) -> float | None:
+    """Return a climate state's target temperature, or None if unusable (CC-42)."""
+    if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+        return None
+    raw = state.attributes.get("temperature")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except TypeError, ValueError:
+        return None
+
+
+def _classify_climate_change(
+    old_state: State | None,
+    new_state: State | None,
+    ctx: Context,
+    own_cmd: tuple[str, int | None, float] | None,
+    now: float,
+) -> str:
+    """
+    Classify a climate entity state change for the setpoint hold (CC-42).
+
+    Checked in order: ``"ignored"`` (no usable setpoint on either side, or an
+    unchanged one — HVAC-mode-, fan-mode- or current-temperature-only
+    updates), ``"own"`` (the controller's own command context),
+    ``"automation"`` (context has a parent), ``"own"`` again for a change
+    within ``SETPOINT_ECHO_WINDOW_SECONDS`` of a command that either landed
+    within ``SETPOINT_TOLERANCE`` of the commanded setpoint or followed a
+    non-setpoint command (mode/off — a device switching mode may surface its
+    stored per-mode setpoint in a later poll under a fresh context),
+    otherwise ``"manual"``. There is deliberately no
+    ``"user"`` outcome: a change made in the HA app is a manual change.
+    ``own_cmd`` is ``(context id, commanded whole-°F setpoint or None for a
+    non-setpoint command, monotonic time)``.
+    """
+    old = _setpoint_of(old_state)
+    new = _setpoint_of(new_state)
+    if old is None or new is None or old == new:
+        return "ignored"
+    if own_cmd is not None and ctx.id == own_cmd[0]:
+        return "own"
+    if ctx.parent_id is not None:
+        return "automation"
+    if own_cmd is not None:
+        _cmd_id, cmd_setpoint, cmd_at = own_cmd
+        if now - cmd_at <= SETPOINT_ECHO_WINDOW_SECONDS and (
+            cmd_setpoint is None or abs(new - cmd_setpoint) < SETPOINT_TOLERANCE
+        ):
+            return "own"
+    return "manual"
+
+
 class RoomController:
     """Reacts to a room's live entities and commands the physical devices."""
 
@@ -335,6 +393,26 @@ class RoomController:
         # (context id, commanded on-state, time.monotonic()) of the last vent
         # command this controller sent, so its echo is never taken as manual.
         self._vent_cmd: tuple[str, bool, float] | None = None
+        # Thermostat setpoint hold (CC-41..CC-44): in-memory only. A dedicated
+        # listener on the room's climate entities classifies setpoint changes;
+        # a manual one stops the controller driving that entity (and its
+        # power switch) until the hold timer expires.
+        room_climates = (
+            room.ac_climate if room.has_ac else None,
+            room.heater_climate if room.has_heater else None,
+        )
+        self._climate_entities: frozenset[str] = frozenset(
+            eid for eid in room_climates if eid
+        )
+        self._unsub_climate: Callable[[], None] | None = None
+        # entity_id -> (context id, commanded whole-°F setpoint or None for a
+        # non-setpoint command, time.monotonic()) of the last command this
+        # controller sent to each climate entity, so its echo is never taken
+        # as a manual change.
+        self._climate_cmd: dict[str, tuple[str, int | None, float]] = {}
+        # entity_id -> (hold end, the device setpoint that started the hold).
+        self._setpoint_holds: dict[str, tuple[datetime, float]] = {}
+        self._unsub_hold_timers: dict[str, Callable[[], None]] = {}
 
     # -- lifecycle -----------------------------------------------------------
     @callback
@@ -346,6 +424,12 @@ class RoomController:
             # change never triggers the generic evaluation path.
             self._unsub_vent = async_track_state_change_event(
                 self.hass, [self.room.vent_fan_entity], self._on_vent_change
+            )
+        if self._climate_entities and self.room.setpoint_hold_minutes > 0:
+            # CC-41: likewise a separate listener, so a climate entity's own
+            # state changes never trigger the generic evaluation path.
+            self._unsub_climate = async_track_state_change_event(
+                self.hass, sorted(self._climate_entities), self._on_climate_change
             )
         self.async_request_run(trigger="startup")
         self._log_capabilities()
@@ -369,6 +453,14 @@ class RoomController:
         if self._unsub_vent_timer:
             self._unsub_vent_timer()
             self._unsub_vent_timer = None
+        if self._unsub_climate:
+            self._unsub_climate()
+            self._unsub_climate = None
+        for unsub in self._unsub_hold_timers.values():
+            unsub()
+        self._unsub_hold_timers.clear()
+        self._setpoint_holds.clear()
+        self._climate_cmd.clear()
 
     @callback
     def _delayed_resubscribe(self, _now: object) -> None:
@@ -632,6 +724,7 @@ class RoomController:
         self._vent_override_until = None
         self._publish_vent_override()
         _LOGGER.info("[room=%s] Vent fan override expired", self.room.key)
+        self._notify("vent_fan", "Vent fan override ended — resuming climate control.")
         self.async_request_run(trigger="vent fan override expired")
 
     @callback
@@ -660,6 +753,125 @@ class RoomController:
             state,
             self._vent_override_until,
         )
+
+    # -- thermostat setpoint hold (CC-41..CC-44) -----------------------------
+    @callback
+    def _on_climate_change(self, event: Event[EventStateChangedData]) -> None:
+        """Classify a climate setpoint change; a manual one starts a hold (CC-41)."""
+        data = event.data
+        entity_id: str = data["entity_id"]
+        old = data["old_state"]
+        new = data["new_state"]
+        ctx = event.context
+        kind = _classify_climate_change(
+            old, new, ctx, self._climate_cmd.get(entity_id), time.monotonic()
+        )
+        if kind == "ignored":
+            # CC-L12: unavailable/unknown transitions and unchanged-target
+            # updates (the most frequent climate changes) are not logged.
+            return
+        old_setpoint = _setpoint_of(old)
+        new_setpoint = _setpoint_of(new)
+        outcome = "no hold"
+        level = logging.DEBUG
+        if kind == "manual":
+            level = logging.INFO
+            # A real manual change supersedes the command record. An "own"
+            # result deliberately keeps it: devices commonly emit a
+            # context-tagged optimistic write and then a context-less poll
+            # with a rounded value seconds later; the record ages out via the
+            # echo window instead.
+            self._climate_cmd.pop(entity_id, None)
+            # Same read (and dormant default) as _build_inputs.
+            if self._switch_state(KEY_MANUAL_MODE, default=True):
+                outcome = "no hold (manual mode)"
+            else:
+                restarted = entity_id in self._setpoint_holds
+                self._start_setpoint_hold(entity_id, new_setpoint)
+                until = dt_util.as_local(self._setpoint_holds[entity_id][0])
+                prefix = "hold restarted" if restarted else "hold"
+                outcome = f"{prefix} until {until:%H:%M}"
+        _LOGGER.log(
+            level,
+            "[room=%s] Climate %s setpoint %s→%s: %s (context id=%s parent_id=%s) — %s",
+            self.room.key,
+            entity_id,
+            old_setpoint,
+            new_setpoint,
+            kind,
+            ctx.id,
+            ctx.parent_id,
+            outcome,
+        )
+
+    @callback
+    def _start_setpoint_hold(self, entity_id: str, setpoint: float) -> None:
+        """Stop driving ``entity_id`` for the room's hold duration (CC-41)."""
+        if unsub := self._unsub_hold_timers.pop(entity_id, None):
+            unsub()
+        minutes = self.room.setpoint_hold_minutes
+        until = dt_util.utcnow() + timedelta(minutes=minutes)
+        self._setpoint_holds[entity_id] = (until, setpoint)
+        self._unsub_hold_timers[entity_id] = async_call_later(
+            self.hass, minutes * 60, partial(self._setpoint_hold_expired, entity_id)
+        )
+        self._publish_setpoint_hold(entity_id)
+        self.async_request_run(trigger="setpoint hold started")
+
+    @callback
+    def _setpoint_hold_expired(self, entity_id: str, _now: object) -> None:
+        """End a hold; the controller re-asserts its setpoint at once (CC-41/CC-44)."""
+        self._unsub_hold_timers.pop(entity_id, None)
+        self._setpoint_holds.pop(entity_id, None)
+        # CC-19: forget the commanded setpoint so the no-memory path compares
+        # the device's (manually changed) setpoint and re-sends RCC's value.
+        self._last_commanded_setpoints.pop(entity_id, None)
+        self._publish_setpoint_hold(entity_id)
+        _LOGGER.info("[room=%s] Setpoint hold expired: %s", self.room.key, entity_id)
+        role = self._hold_role(entity_id)
+        label = "A/C" if role == "ac" else "Heater"
+        self._notify(role, f"{label} hold ended — resuming climate control.")
+        self.async_request_run(trigger="setpoint hold expired")
+
+    @callback
+    def _clear_setpoint_holds(self, reason: str) -> None:
+        """Drop every active hold early, e.g. when Manual Mode turns on (CC-43)."""
+        for entity_id in list(self._setpoint_holds):
+            if unsub := self._unsub_hold_timers.pop(entity_id, None):
+                unsub()
+            del self._setpoint_holds[entity_id]
+            self._publish_setpoint_hold(entity_id)
+            _LOGGER.info(
+                "[room=%s] Setpoint hold cleared: %s: %s",
+                self.room.key,
+                entity_id,
+                reason,
+            )
+
+    def _hold_role(self, entity_id: str) -> str:
+        """Device role of a held climate entity ("ac" for a combined room)."""
+        return "ac" if entity_id == self.room.ac_climate else "heater"
+
+    @callback
+    def _publish_setpoint_hold(self, entity_id: str) -> None:
+        """Push a climate entity's hold state to its status sensor (CC-43)."""
+        hold = self._setpoint_holds.get(entity_id)
+        async_dispatcher_send(
+            self.hass,
+            f"{SIGNAL_SETPOINT_HOLD}_{self.entry.entry_id}_{self.room.key}_"
+            f"{self._hold_role(entity_id)}",
+            "active" if hold else "none",
+            hold[0] if hold else None,
+            hold[1] if hold else None,
+        )
+
+    @callback
+    def _notify(self, device: str, message: str) -> None:
+        """Send a hold-ended notification in the background (CC-44)."""
+        if self.room.notify_on_hold_end:
+            self.hass.async_create_task(
+                async_send_hold_ended(self.hass, self.room, device, message)
+            )
 
     def _resolve_command(self, cmd: Command) -> Command:
         """
@@ -788,30 +1000,51 @@ class RoomController:
         self, cmd: Command, domain: str, service: str, data: dict
     ) -> None:
         """
-        Send one command's service call (blocking).
+        Send one command's service call (blocking) under its own context.
 
-        CC-39: a vent fan command carries the controller's own context,
-        recorded in ``_vent_cmd`` before the await, so its state-change echo is
-        never mistaken for a manual press. On success the record's time is
-        refreshed so the echo window runs from call completion — unless the
-        echo already consumed it during the call. A failed vent call forgets
-        it; a cancelled one keeps it, since the device may still act on it.
+        CC-39: a vent fan command's context is recorded in ``_vent_cmd`` before
+        the await, so its state-change echo is never mistaken for a manual
+        press. On success the record's time is refreshed so the echo window
+        runs from call completion — unless the echo already consumed it during
+        the call. A failed vent call forgets it; a cancelled one keeps it,
+        since the device may still act on it.
+
+        CC-42: a climate command is recorded the same way in ``_climate_cmd``
+        (with the commanded setpoint for ``SetTemperature``, else None), so its
+        echo never starts a setpoint hold.
         """
-        if cmd.entity_id != self.room.vent_fan_entity:
-            await self.hass.services.async_call(domain, service, data, blocking=True)
-            return
         ctx = Context()
-        cmd_on = service == "turn_on"
-        self._vent_cmd = (ctx.id, cmd_on, time.monotonic())
+        eid = cmd.entity_id
+        if eid == self.room.vent_fan_entity:
+            cmd_on = service == "turn_on"
+            self._vent_cmd = (ctx.id, cmd_on, time.monotonic())
+            try:
+                await self.hass.services.async_call(
+                    domain, service, data, blocking=True, context=ctx
+                )
+            except Exception:
+                self._vent_cmd = None
+                raise
+            if self._vent_cmd is not None and self._vent_cmd[0] == ctx.id:
+                self._vent_cmd = (ctx.id, cmd_on, time.monotonic())
+            return
+        if eid not in self._climate_entities:
+            await self.hass.services.async_call(
+                domain, service, data, blocking=True, context=ctx
+            )
+            return
+        setpoint = cmd.temperature if isinstance(cmd, SetTemperature) else None
+        self._climate_cmd[eid] = (ctx.id, setpoint, time.monotonic())
         try:
             await self.hass.services.async_call(
                 domain, service, data, blocking=True, context=ctx
             )
         except Exception:
-            self._vent_cmd = None
+            self._climate_cmd.pop(eid, None)
             raise
-        if self._vent_cmd is not None and self._vent_cmd[0] == ctx.id:
-            self._vent_cmd = (ctx.id, cmd_on, time.monotonic())
+        record = self._climate_cmd.get(eid)
+        if record is not None and record[0] == ctx.id:
+            self._climate_cmd[eid] = (ctx.id, setpoint, time.monotonic())
 
     def _build_inputs(self) -> EngineInputs | None:
         """Read all live + device state; None if manual mode or invalid temp."""
@@ -825,6 +1058,8 @@ class RoomController:
             self._last_commanded_setpoints.clear()
             # CC-40: Manual Mode ends any vent fan override.
             self._clear_vent_override("manual mode")
+            # CC-43: Manual Mode likewise ends any setpoint hold.
+            self._clear_setpoint_holds("manual mode")
             return None
         room_temp = self._temperature()
         if room_temp is None:
@@ -1025,6 +1260,7 @@ class RoomController:
             current_setpoint=float(raw_setpoint) if raw_setpoint is not None else None,
             last_commanded_setpoint=memory[1] if memory else None,
             last_commanded_hvac_mode=memory[0] if memory else None,
+            held=entity_id in self._setpoint_holds,
         )
 
     def _fan_info(self, entity_id: str | None) -> FanInfo | None:

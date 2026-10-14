@@ -92,6 +92,8 @@ export function resolveRoomConfig(
     fan_high_offset: fanOffsets?.high_offset ?? "",
     vent_fan_entity: e.vent_fan_entity ?? "",
     vent_fan_override: e.vent_fan_override ?? "",
+    ac_setpoint_hold: e.ac_setpoint_hold ?? "",
+    heater_setpoint_hold: e.heater_setpoint_hold ?? "",
     use_vent_fan: vent.use ?? "",
     target_vent_fan: vent.target ?? "",
     vent_humidity_target: vent.humidity_target ?? "",

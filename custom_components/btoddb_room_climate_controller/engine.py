@@ -189,6 +189,10 @@ class ClimateInfo:
     # decision-mode switch (Heat<->Cool) is never mistaken for a converged
     # setpoint just because the two modes' desired values coincide.
     last_commanded_hvac_mode: str | None = None
+    # CC-41: True while a manual setpoint change put this entity on hold. The
+    # engine then emits nothing for the climate entity itself or its power
+    # switch; a split device's companion fan entity is still driven.
+    held: bool = False
 
     @property
     def has_fan(self) -> bool:
@@ -509,6 +513,10 @@ def compute_commands(inp: EngineInputs) -> list[Command]:
 def _combined(inp: EngineInputs, out: _Out) -> None:  # noqa: PLR0912
     ac = inp.ac
     assert ac is not None
+    # CC-41: a held heat pump is left entirely alone (combined rooms have no
+    # companion fan to keep driving).
+    if ac.held:
+        return
     needs_cool = (
         inp.use_ac
         and not inp.window_open
@@ -622,38 +630,42 @@ def _split_ac(inp: EngineInputs, out: _Out) -> None:
         )
     )
     decision = COOL if needs_cool else (FAN_ONLY if override_fan_only else OFF)
-    current = ac.hvac_mode
 
-    if inp.ac_power and decision in (COOL, FAN_ONLY) and not inp.ac_power.is_on:
-        out.add(SwitchTurnOn(inp.ac_power.entity_id), Delay(inp.power_on_delay_ms))
-    if decision not in {OFF, current}:
-        out.add(SetHvacMode(ac.entity_id, decision), Delay(inp.command_delay_ms))
-    if decision == OFF and current not in _OFF_LIKE:
-        out.add(
-            SetHvacMode(ac.entity_id, OFF),
-            Delay(inp.command_delay_ms),
-            TurnOffClimate(ac.entity_id),
-        )
-    desired_setpoint = clamp_setpoint(inp.ac_setpoint_int, ac.min_temp, ac.max_temp)
-    # CC-32: setpoint is meaningless in fan-only, and devices report
-    # mode-dependent (sometimes degenerate) ranges there — only send it while
-    # actively conditioning.
-    if (
-        decision == COOL
-        and ac.supports_set_temp
-        and _setpoint_needs_send(
-            ac.current_setpoint,
-            desired_setpoint,
-            ac.last_commanded_setpoint,
-            decision,
-            ac.last_commanded_hvac_mode,
-        )
-    ):
-        out.add(SetTemperature(ac.entity_id, inp.ac_setpoint_int, decision))
-    if inp.ac_power and decision == OFF and inp.ac_power.is_on:
-        out.add(SwitchTurnOff(inp.ac_power.entity_id))
+    # CC-41: a held A/C (and its power switch) is left alone; the companion
+    # fan below still follows the decision.
+    if not ac.held:
+        current = ac.hvac_mode
+        if inp.ac_power and decision in (COOL, FAN_ONLY) and not inp.ac_power.is_on:
+            out.add(SwitchTurnOn(inp.ac_power.entity_id), Delay(inp.power_on_delay_ms))
+        if decision not in {OFF, current}:
+            out.add(SetHvacMode(ac.entity_id, decision), Delay(inp.command_delay_ms))
+        if decision == OFF and current not in _OFF_LIKE:
+            out.add(
+                SetHvacMode(ac.entity_id, OFF),
+                Delay(inp.command_delay_ms),
+                TurnOffClimate(ac.entity_id),
+            )
+        desired_setpoint = clamp_setpoint(inp.ac_setpoint_int, ac.min_temp, ac.max_temp)
+        # CC-32: setpoint is meaningless in fan-only, and devices report
+        # mode-dependent (sometimes degenerate) ranges there — only send it
+        # while actively conditioning.
+        if (
+            decision == COOL
+            and ac.supports_set_temp
+            and _setpoint_needs_send(
+                ac.current_setpoint,
+                desired_setpoint,
+                ac.last_commanded_setpoint,
+                decision,
+                ac.last_commanded_hvac_mode,
+            )
+        ):
+            out.add(SetTemperature(ac.entity_id, inp.ac_setpoint_int, decision))
+        if inp.ac_power and decision == OFF and inp.ac_power.is_on:
+            out.add(SwitchTurnOff(inp.ac_power.entity_id))
 
-    has_fan_modes = bool(ac.fan_modes)
+    # CC-41: a held climate never gets SetFanMode either.
+    has_fan_modes = bool(ac.fan_modes) and not ac.held
     if not (has_fan_modes or inp.ac_fan):
         return
     if decision in (COOL, FAN_ONLY):
@@ -696,44 +708,58 @@ def _split_heater(inp: EngineInputs, out: _Out) -> None:
     )
     current = heater.hvac_mode
 
-    if inp.heater_power and decision in (HEAT, FAN_ONLY) and not inp.heater_power.is_on:
-        out.add(SwitchTurnOn(inp.heater_power.entity_id), Delay(inp.power_on_delay_ms))
-    if decision not in {OFF, current}:
-        out.add(SetHvacMode(heater.entity_id, decision), Delay(inp.command_delay_ms))
-    if decision == OFF and current != OFF:
-        out.add(
-            SetHvacMode(heater.entity_id, OFF),
-            Delay(inp.command_delay_ms),
-            TurnOffClimate(heater.entity_id),
+    # CC-41: a held heater (and its power switch) is left alone; the companion
+    # fan below still follows the decision.
+    if not heater.held:
+        if (
+            inp.heater_power
+            and decision in (HEAT, FAN_ONLY)
+            and not inp.heater_power.is_on
+        ):
+            out.add(
+                SwitchTurnOn(inp.heater_power.entity_id), Delay(inp.power_on_delay_ms)
+            )
+        if decision not in {OFF, current}:
+            out.add(
+                SetHvacMode(heater.entity_id, decision), Delay(inp.command_delay_ms)
+            )
+        if decision == OFF and current != OFF:
+            out.add(
+                SetHvacMode(heater.entity_id, OFF),
+                Delay(inp.command_delay_ms),
+                TurnOffClimate(heater.entity_id),
+            )
+        desired_setpoint = clamp_setpoint(
+            inp.heater_setpoint_int, heater.min_temp, heater.max_temp
         )
-    desired_setpoint = clamp_setpoint(
-        inp.heater_setpoint_int, heater.min_temp, heater.max_temp
-    )
-    # CC-32: setpoint is meaningless in fan-only, and devices report
-    # mode-dependent (sometimes degenerate) ranges there — only send it while
-    # actively conditioning. The gate compares the snapshot-clamped
-    # desired_setpoint against memory, while SetTemperature below carries the
-    # raw (unclamped) int — the controller clamps again against the *live*
-    # range at send time (clamp-only; see ``_resolve_command``) and stores the
-    # resolved value (CC-19/CC-35), so a stale build-time snapshot can briefly
-    # disagree with the live send-time clamp without looping (the controller's
-    # resolved-vs-memory skip in ``_run`` absorbs that).
-    if (
-        decision == HEAT
-        and heater.supports_set_temp
-        and _setpoint_needs_send(
-            heater.current_setpoint,
-            desired_setpoint,
-            heater.last_commanded_setpoint,
-            decision,
-            heater.last_commanded_hvac_mode,
-        )
-    ):
-        out.add(SetTemperature(heater.entity_id, inp.heater_setpoint_int, decision))
-    if inp.heater_power and decision == OFF and inp.heater_power.is_on:
-        out.add(SwitchTurnOff(inp.heater_power.entity_id))
+        # CC-32: setpoint is meaningless in fan-only, and devices report
+        # mode-dependent (sometimes degenerate) ranges there — only send it
+        # while actively conditioning. The gate compares the snapshot-clamped
+        # desired_setpoint against memory, while SetTemperature below carries
+        # the raw (unclamped) int — the controller clamps again against the
+        # *live* range at send time (clamp-only; see ``_resolve_command``) and
+        # stores the resolved value (CC-19/CC-35), so a stale build-time
+        # snapshot can briefly disagree with the live send-time clamp without
+        # looping (the controller's resolved-vs-memory skip in ``_run``
+        # absorbs that).
+        if (
+            decision == HEAT
+            and heater.supports_set_temp
+            and _setpoint_needs_send(
+                heater.current_setpoint,
+                desired_setpoint,
+                heater.last_commanded_setpoint,
+                decision,
+                heater.last_commanded_hvac_mode,
+            )
+        ):
+            out.add(SetTemperature(heater.entity_id, inp.heater_setpoint_int, decision))
+        if inp.heater_power and decision == OFF and inp.heater_power.is_on:
+            out.add(SwitchTurnOff(inp.heater_power.entity_id))
 
-    has_fan_modes = bool(heater.fan_modes)
+    # CC-41: a held climate never gets SetFanMode, nor the SetHvacMode(OFF)
+    # fallback below.
+    has_fan_modes = bool(heater.fan_modes) and not heater.held
     if not (has_fan_modes or inp.heater_fan):
         return
     if decision in (HEAT, FAN_ONLY):

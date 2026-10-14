@@ -69,12 +69,16 @@
             "heater_power_switch": "Heater power switch",
             "heater_fan_only_override": "Allow heater fan-only circulation",
             "heater_setpoint_offset": "Heater setpoint offset (°F, optional, default 2)",
+            "setpoint_hold_minutes": "Thermostat hold after a manual setpoint change (minutes, optional, default 60)",
+            "notify_on_hold_end": "Notify when a thermostat hold or vent fan override ends",
             "fan_entities": "Fans",
             "vent_fan_entity": "Vent fan"
           },
           "data_description": {
             "ac_setpoint_offset": "While cooling, the device's own setpoint is the room target minus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
             "heater_setpoint_offset": "While heating, the device's own setpoint is the room target plus this offset, clamped to the device's range (1 °F kept in reserve). Blank uses 2.",
+            "setpoint_hold_minutes": "When someone changes a thermostat's target temperature by hand (wall panel, remote, HA app — not an automation), the controller leaves that device alone for this long, then resumes. 0 disables holds for this room.",
+            "notify_on_hold_end": "Sends a notification through the btoddb_notifications integration when a hold or override ends. Skipped if that integration is not installed.",
             "fan_entities": "Standalone fans in this room (each gets its own target temperature; they share the room's fan-speed offsets).",
             "vent_fan_entity": "On/off smart switch (switch or light entity) or smart vent fan; turned on by the room's humidity or temperature."
           }
