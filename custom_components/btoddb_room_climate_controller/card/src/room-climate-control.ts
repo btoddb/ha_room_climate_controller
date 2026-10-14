@@ -33,6 +33,8 @@ import {
   getTargetTemp,
   getTargetTempValue,
   getVentFanMode,
+  isHoldActive,
+  pressButton,
   setInputNumber,
   type TargetTempDevice,
   windowOpen,
@@ -298,6 +300,9 @@ export class RoomClimateControl extends LitElement {
       row isn't humidity-triggered (cooling/heating rows). */
       humidityTargetHelper?: string;
       humidityHighOffsetHelper?: string;
+      /** UX-38: show a Resume button on the status line while this row's
+      hold/override is active and the room has a resume_control button. */
+      resume?: { active: boolean; buttonId: string };
     }) => {
       const {
         label,
@@ -311,6 +316,7 @@ export class RoomClimateControl extends LitElement {
         suppressed = false,
         humidityTargetHelper,
         humidityHighOffsetHelper,
+        resume,
       } = opts;
 
       if (!entityConfigured(deviceEntity) || !entityAvailable(this.hass, deviceEntity)) {
@@ -395,6 +401,24 @@ export class RoomClimateControl extends LitElement {
             <div class="device-label">${label}</div>
             <div class="device-secondary">
               <span>${mode}</span>
+              ${resume?.active && resume.buttonId
+                ? html`<button
+                    class="resume-btn"
+                    type="button"
+                    title="Resume automatic control"
+                    @click=${(e: Event) => {
+                      e.stopPropagation();
+                      pressButton(this.hass, resume.buttonId);
+                    }}
+                    @keydown=${(e: KeyboardEvent) => {
+                      // Native Enter/Space activate the button (click); keep
+                      // the parent row's more-info handler from also firing.
+                      if (e.key === "Enter" || e.key === " ") e.stopPropagation();
+                    }}
+                  >
+                    Resume
+                  </button>`
+                : nothing}
             </div>
           </div>
           <div class="device-toggles">
@@ -453,6 +477,10 @@ export class RoomClimateControl extends LitElement {
       modeFn: (hass, id) => getClimateHoldMode(hass, id, c.ac_setpoint_hold),
       fanOnlyOverrideToggle: c.ac_fan_only_override,
       suppressed: winOpen,
+      resume: {
+        active: isHoldActive(this.hass, c.ac_setpoint_hold),
+        buttonId: c.resume_control ?? "",
+      },
     });
     addDevice({
       label: "Heating",
@@ -464,6 +492,10 @@ export class RoomClimateControl extends LitElement {
       modeFn: (hass, id) => getClimateHoldMode(hass, id, c.heater_setpoint_hold),
       fanOnlyOverrideToggle: sharedClimateDevice ? undefined : c.heater_fan_only_override,
       suppressed: winOpen,
+      resume: {
+        active: isHoldActive(this.hass, c.heater_setpoint_hold),
+        buttonId: c.resume_control ?? "",
+      },
     });
     // One row per fan. All fans share the room's single high offset (used only
     // for the effective-limit math), but each has its own use/target/reverse
@@ -494,6 +526,10 @@ export class RoomClimateControl extends LitElement {
         targetHelper: c.target_vent_fan,
         modeFn: (hass, id) => getVentFanMode(hass, id, c.vent_fan_override),
         humidityTargetHelper: c.vent_humidity_target,
+        resume: {
+          active: isHoldActive(this.hass, c.vent_fan_override),
+          buttonId: c.resume_control ?? "",
+        },
       });
     }
 

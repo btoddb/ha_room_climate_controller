@@ -218,6 +218,22 @@ export function formatUntilTime(until: unknown): string | undefined {
   return formatTime12h(`${end.getHours()}:${end.getMinutes()}`);
 }
 
+/** True while a hold/override sensor reports one in effect: a setpoint-hold
+sensor (CC-41) reading "active" or a vent fan override sensor (CC-38) reading
+"on"/"off". Missing/empty ids, missing entities, "none", unavailable, unknown,
+and anything else read as no hold. Gates the row's Resume button (UX-38). */
+export function isHoldActive(hass: HomeAssistant, sensorId?: string): boolean {
+  if (!entityConfigured(sensorId)) return false;
+  const state = hass.states[sensorId!]?.state;
+  return state === "active" || state === "on" || state === "off";
+}
+
+/** Press a `button.*` entity, e.g. the room's "Resume control" button that
+ends every active setpoint hold and vent fan override (CC-45, UX-38). */
+export function pressButton(hass: HomeAssistant, entityId: string): void {
+  void hass.callService("button", "press", { entity_id: entityId });
+}
+
 /** Set a number value on `number.*` or legacy `input_number.*` (domain-aware). */
 export function setInputNumber(
   hass: HomeAssistant,

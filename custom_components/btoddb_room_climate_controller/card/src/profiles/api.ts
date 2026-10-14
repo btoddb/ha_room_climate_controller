@@ -118,6 +118,10 @@ export interface WsRoom {
     them, so readers must treat a missing value as no hold. */
     ac_setpoint_hold: string | null;
     heater_setpoint_hold: string | null;
+    /** The room's "Resume control" button (CC-45, UX-38) that ends every
+    active setpoint hold and vent fan override, or null when the room has no
+    A/C, heater or vent fan. Older backends omit it. */
+    resume_control: string | null;
     window_sensors: string[];
     /** "cooling"/"heating"/"vent_fan" — the "fan" key moved to `fans`. */
     live: Record<string, WsRoomLive>;

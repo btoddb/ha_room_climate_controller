@@ -340,4 +340,20 @@ export const cardStyles = css`
     padding: 16px;
     color: var(--error-color, #b00020);
   }
+
+  /* UX-38: small, visually quiet inline Resume button on a row's status
+     line; line-height 1 keeps the status line from growing (UX-6). */
+  .resume-btn {
+    margin-left: 6px;
+    padding: 1px 6px;
+    font: inherit;
+    font-size: 0.75em;
+    line-height: 1;
+    color: var(--primary-color);
+    background: transparent;
+    border: 1px solid var(--divider-color, currentColor);
+    border-radius: 4px;
+    cursor: pointer;
+    vertical-align: middle;
+  }
 `;

@@ -9,6 +9,8 @@ import {
   getNumberLimits,
   getTargetTempValue,
   getVentFanMode,
+  isHoldActive,
+  pressButton,
   type TargetTempDevice,
 } from "../src/helpers.ts";
 import type { HomeAssistant } from "../src/ha-types.ts";
@@ -342,5 +344,62 @@ describe("getClimateHoldMode", () => {
   it("stays — when the climate entity is missing", () => {
     const hold = { state: "active", until: UNTIL };
     assert.equal(getClimateHoldMode(climateHass(undefined, hold), AC, HOLD), "—");
+  });
+});
+
+describe("isHoldActive", () => {
+  const SENSOR = "sensor.hold";
+
+  function holdHass(state?: string): HomeAssistant {
+    const states: Record<string, unknown> = {};
+    if (state !== undefined) {
+      states[SENSOR] = { entity_id: SENSOR, state, attributes: {} };
+    }
+    return { states } as HomeAssistant;
+  }
+
+  it("is false for an empty or undefined sensor id", () => {
+    const hass = holdHass("active");
+    assert.equal(isHoldActive(hass, ""), false);
+    assert.equal(isHoldActive(hass, undefined), false);
+    assert.equal(isHoldActive(hass), false);
+  });
+
+  it("is false when the sensor entity is missing", () => {
+    assert.equal(isHoldActive(holdHass(), SENSOR), false);
+  });
+
+  it("is false when the sensor reads none", () => {
+    assert.equal(isHoldActive(holdHass("none"), SENSOR), false);
+  });
+
+  it("is true for an active setpoint hold", () => {
+    assert.equal(isHoldActive(holdHass("active"), SENSOR), true);
+  });
+
+  it("is true for a vent override reading on or off", () => {
+    assert.equal(isHoldActive(holdHass("on"), SENSOR), true);
+    assert.equal(isHoldActive(holdHass("off"), SENSOR), true);
+  });
+
+  it("is false when the sensor is unavailable", () => {
+    assert.equal(isHoldActive(holdHass("unavailable"), SENSOR), false);
+  });
+});
+
+describe("pressButton", () => {
+  it("calls button.press on the given entity", () => {
+    const calls: unknown[][] = [];
+    const hass = {
+      states: {},
+      callService: (...args: unknown[]) => {
+        calls.push(args);
+        return Promise.resolve();
+      },
+    } as unknown as HomeAssistant;
+    pressButton(hass, "button.living_room_resume_control");
+    assert.deepEqual(calls, [
+      ["button", "press", { entity_id: "button.living_room_resume_control" }],
+    ]);
   });
 });

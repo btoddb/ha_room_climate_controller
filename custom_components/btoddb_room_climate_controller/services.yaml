@@ -18,3 +18,11 @@ set_manual_mode:
       example: true
       selector:
         boolean:
+
+resume_control:
+  fields:
+    room:
+      required: true
+      example: todds_bedroom
+      selector:
+        text:

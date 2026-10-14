@@ -18,6 +18,7 @@ LOGGER_PROFILE: Final = f"custom_components.{DOMAIN}.profile"
 LOGGER_CAPABILITIES: Final = f"custom_components.{DOMAIN}.capabilities"
 
 PLATFORMS: Final = [
+    Platform.BUTTON,
     Platform.SENSOR,
     Platform.NUMBER,
     Platform.SELECT,
@@ -229,6 +230,8 @@ KEY_VENT_OVERRIDE: Final = "vent_fan_override"
 # Thermostat setpoint hold status sensors (CC-43), one per held climate role.
 KEY_AC_SETPOINT_HOLD: Final = "ac_setpoint_hold"
 KEY_HEATER_SETPOINT_HOLD: Final = "heater_setpoint_hold"
+# Per-room "Resume control" button (CC-45), only with an A/C, heater or vent fan.
+KEY_RESUME_CONTROL: Final = "resume_control"
 KEY_MANUAL_MODE: Final = "manual_mode"
 KEY_AC_FAN_ONLY: Final = "ac_fan_only_override"
 KEY_HEATER_FAN_ONLY: Final = "heater_fan_only_override"

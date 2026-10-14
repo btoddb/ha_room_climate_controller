@@ -914,6 +914,41 @@ class RoomController:
             self._run(trigger), f"{DOMAIN} control {self.room.key}"
         )
 
+    @callback
+    def async_resume_control(self, source: str) -> bool:
+        """
+        End every active setpoint hold and the vent override now (CC-45).
+
+        Never notifies: resuming is a deliberate user action, like a Manual
+        Mode clear. Returns whether anything was active.
+        """
+        held = list(self._setpoint_holds)
+        had_vent = self._vent_override is not None
+        reason = f"resume control ({source})"
+        self._clear_setpoint_holds(reason)
+        self._clear_vent_override(reason)
+        # CC-19: forget the commanded setpoint of each formerly held entity so
+        # the no-memory path re-asserts RCC's value (as on hold expiry).
+        for entity_id in held:
+            self._last_commanded_setpoints.pop(entity_id, None)
+        if held or had_vent:
+            _LOGGER.info(
+                "[room=%s] Resume control (%s): cleared %d setpoint hold(s), "
+                "vent override %s",
+                self.room.key,
+                source,
+                len(held),
+                "yes" if had_vent else "no",
+            )
+        else:
+            _LOGGER.debug(
+                "[room=%s] Resume control (%s): nothing to resume",
+                self.room.key,
+                source,
+            )
+        self.async_request_run(trigger="resume control")
+        return bool(held or had_vent)
+
     async def _run(self, trigger: str = "evaluation") -> None:
         try:
             inputs = self._build_inputs()
