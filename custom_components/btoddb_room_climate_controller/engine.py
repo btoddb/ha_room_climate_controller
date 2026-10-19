@@ -34,13 +34,19 @@ _OFF_LIKE = frozenset({"off", "unavailable", "unknown", "none", "", None})
 # within HYSTERESIS_OFF of the target; once stopped it does not restart until
 # the room passes the next whole degree past the target. The device's reported
 # running mode (COOL/HEAT/fan on) is the hysteresis state — the engine stays
-# stateless. Setpoints and fan-speed tiers still truncate (CC-5). The humidity
-# fan trigger (CC-30) uses the same shape with its own wider %RH band.
+# stateless. Setpoints and fan-speed tiers still truncate (CC-5).
 HYSTERESIS_OFF: Final = 0.2
 HYSTERESIS_ON: Final = 1.0
 
-HUMIDITY_HYSTERESIS_OFF: Final = 0.5
-HUMIDITY_HYSTERESIS_ON: Final = 2.0
+# Humidity hysteresis (CC-30): a symmetric ±2 %RH band *around* the target,
+# keyed on the device's reported on/off state like CC-27. A running device
+# keeps running until humidity drops to HUMIDITY_HYSTERESIS_STOP_BELOW under
+# the target; a stopped one restarts only at HUMIDITY_HYSTERESIS_START_ABOVE
+# over it (target 55: on at >= 57, off at <= 53). Humidity sensors commonly
+# report whole %RH and bounce by a few points, so a band that stops just above
+# the target (the former +0.5) cycled a vent fan about once a minute.
+HUMIDITY_HYSTERESIS_STOP_BELOW: Final = 2.0
+HUMIDITY_HYSTERESIS_START_ABOVE: Final = 2.0
 
 MAX_PERCENTAGE: Final = 100.0
 
@@ -66,10 +72,15 @@ def _wants_fan_for_humidity(
     target: float,
     running: bool,  # noqa: FBT001
 ) -> bool:
-    """Humidity hysteresis (CC-30): cooling-style, wider band for noisy %RH."""
+    """
+    Humidity hysteresis (CC-30): a symmetric band around the target.
+
+    Running: keep running while ``humidity > target - STOP_BELOW``. Stopped:
+    restart only once ``humidity >= target + START_ABOVE``.
+    """
     if running:
-        return humidity > target + HUMIDITY_HYSTERESIS_OFF
-    return humidity >= target + HUMIDITY_HYSTERESIS_ON
+        return humidity > target - HUMIDITY_HYSTERESIS_STOP_BELOW
+    return humidity >= target + HUMIDITY_HYSTERESIS_START_ABOVE
 
 
 def _wants_heat(room: float, target: float, running: bool) -> bool:  # noqa: FBT001
@@ -241,6 +252,10 @@ class FanControl:
     humidity_target: float | None = None
     humidity_medium: float | None = None  # absolute: target + medium offset
     humidity_high: float | None = None  # absolute: target + high offset
+    # CC-46: True while a manual change of this fan put it under a manual
+    # override. The engine then emits nothing at all for this fan — no on/off,
+    # speed, preset or direction command.
+    held: bool = False
 
 
 @dataclass(frozen=True)
@@ -830,6 +845,10 @@ def _same_fan_speed(reported: int, target: int, step: float) -> bool:
 # Standalone fan (shared by both branches)
 # ---------------------------------------------------------------------------
 def _standalone_fan(fan: FanControl, inp: EngineInputs, out: _Out) -> None:
+    # CC-46: a fan under a manual override is left entirely alone — the user's
+    # on/off, speed, preset and direction stand until the override ends.
+    if fan.held:
+        return
     info = fan.info
     # CC-13/CC-27: run when Use fan on and past the fan threshold (cooling-style
     # hysteresis keyed on the fan's own reported on/off state). CC-28/CC-29:

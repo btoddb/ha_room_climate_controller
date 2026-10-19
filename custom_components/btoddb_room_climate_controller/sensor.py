@@ -6,9 +6,10 @@ dashboards) reference a stable ``sensor.<room>_room_*`` entity even if the
 underlying device sensor is swapped out later. A single hub-level
 ``Outdoor Temperature`` mirror does the same for the outdoor source, so graphs
 can re-point the real weather sensor in one place. Rooms with a vent fan also
-get a ``Vent fan override`` status sensor (CC-40), and rooms with an A/C and/or
+get a ``Vent fan override`` status sensor (CC-40), rooms with an A/C and/or
 heater get ``A/C setpoint hold`` / ``Heater setpoint hold`` status sensors
-(CC-43), all fed by the controller.
+(CC-43), and every standalone fan gets a ``<fan> override`` status sensor
+(CC-48), all fed by the controller.
 """
 
 from __future__ import annotations
@@ -37,13 +38,20 @@ from .const import (
     KEY_ROOM_POWER,
     KEY_ROOM_TEMPERATURE,
     KEY_VENT_OVERRIDE,
+    SIGNAL_FAN_OVERRIDE,
     SIGNAL_SETPOINT_HOLD,
     SIGNAL_VENT_OVERRIDE,
 )
 from .entity import hub_identifier, room_device_info
-from .models import Room, room_uid
+from .models import Room, fan_override_key, fan_slug, room_uid
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _fan_label(entity_id: str) -> str:
+    """Human-readable label for a fan entity id (object_id titled)."""
+    return entity_id.rsplit(".", maxsplit=1)[-1].replace("_", " ").title()
+
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -130,6 +138,12 @@ async def async_setup_entry(
             hold_sensors.append(SetpointHoldSensor(entry, room, "heater"))
         if hold_sensors:
             async_add_entities(hold_sensors, config_subentry_id=room.room_id)
+        # CC-48: one override sensor per standalone fan.
+        if room.has_fan and room.fan_entities:
+            async_add_entities(
+                [FanOverrideSensor(entry, room, eid) for eid in room.fan_entities],
+                config_subentry_id=room.room_id,
+            )
 
     outdoor_source = entry.data.get(CONF_OUTDOOR_SENSOR)
     if outdoor_source:
@@ -224,6 +238,50 @@ class VentOverrideSensor(SensorEntity):
         self._attr_options = ["none", "on", "off"]
         self._signal = f"{SIGNAL_VENT_OVERRIDE}_{entry.entry_id}_{room.key}"
         self._attr_unique_id = room_uid(entry.entry_id, room.key, KEY_VENT_OVERRIDE)
+        self._attr_device_info = room_device_info(entry, room)
+        self._attr_native_value = "none"
+        self._attr_extra_state_attributes = {"until": None}
+
+    async def async_added_to_hass(self) -> None:
+        """Follow the controller's override updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, self._signal, self._handle_override)
+        )
+
+    @callback
+    def _handle_override(self, state: str, until: datetime | None) -> None:
+        self._attr_native_value = state
+        self._attr_extra_state_attributes = {
+            "until": until.isoformat() if until else None
+        }
+        self.async_write_ha_state()
+
+
+class FanOverrideSensor(SensorEntity):
+    """
+    A standalone fan's manual-override status (CC-48): ``none``/``active``.
+
+    Fed by the room controller over a per-fan dispatcher signal. Attribute
+    ``until`` (ISO timestamp, None when no override is active). Not restored:
+    the override is in-memory, so after a restart it is ``none``.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:fan-clock"
+    _attr_device_class = SensorDeviceClass.ENUM
+
+    def __init__(
+        self, entry: RoomClimateConfigEntry, room: Room, entity_id: str
+    ) -> None:
+        """Initialize the status sensor for one fan, attached to the room device."""
+        slug = fan_slug(entity_id)
+        self._attr_name = f"{_fan_label(entity_id)} override"
+        self._attr_options = ["none", "active"]
+        self._signal = f"{SIGNAL_FAN_OVERRIDE}_{entry.entry_id}_{room.key}_{slug}"
+        self._attr_unique_id = room_uid(
+            entry.entry_id, room.key, fan_override_key(slug)
+        )
         self._attr_device_info = room_device_info(entry, room)
         self._attr_native_value = "none"
         self._attr_extra_state_attributes = {"until": None}

@@ -117,6 +117,11 @@ def fan_reverse_key(slug: str) -> str:
     return f"fan_reverse__{slug}"
 
 
+def fan_override_key(slug: str) -> str:
+    """Room per-fan manual-override status sensor key suffix (CC-48)."""
+    return f"fan_override__{slug}"
+
+
 # Per-fan PROFILE preset-entity key builders (suffixes under profile_uid).
 def profile_fan_temp_key(slug: str) -> str:
     """Profile per-fan preset target-temp entity key suffix."""
@@ -250,7 +255,8 @@ class Room:
     has_vent_fan: bool = False
     vent_fan_entity: str | None = None
     # CC-41/CC-44: minutes a manual thermostat setpoint change pauses control
-    # of that climate entity (0 disables), and whether its end is notified.
+    # of that climate entity (0 disables), and whether its end (or the end of
+    # a vent fan or standalone fan override, CC-38/CC-46) is notified.
     setpoint_hold_minutes: int = DEFAULT_SETPOINT_HOLD_MINUTES
     notify_on_hold_end: bool = True
 
@@ -369,7 +375,7 @@ def describe_room_settings(room: Room) -> str:
         parts.append(f"vent_fan_entity={room.vent_fan_entity}")
     if room.has_ac or room.has_heater:
         parts.append(f"setpoint_hold_minutes={room.setpoint_hold_minutes}")
-    if room.has_ac or room.has_heater or room.has_vent_fan:
+    if room.has_ac or room.has_heater or room.has_vent_fan or room.has_fan:
         parts.append(f"notify_on_hold_end={room.notify_on_hold_end}")
     parts.append(f"temperature_sensor={room.temperature_sensor}")
     if room.humidity_sensor:

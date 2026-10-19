@@ -55,8 +55,15 @@ def test_vent_only_room_gets_notify_but_no_hold_minutes():
     assert CONF_NOTIFY_ON_HOLD_END in fields
 
 
-def test_hold_fields_absent_for_fan_only_room():
+def test_fan_only_room_gets_notify_but_no_hold_minutes():
+    """CC-44: notify also gates the standalone fan override notification (CC-46)."""
     fields = _fields(**{CONF_HAS_FAN: True})
+    assert CONF_SETPOINT_HOLD_MINUTES not in fields
+    assert CONF_NOTIFY_ON_HOLD_END in fields
+
+
+def test_hold_fields_absent_without_holdable_devices():
+    fields = _fields()
     assert CONF_SETPOINT_HOLD_MINUTES not in fields
     assert CONF_NOTIFY_ON_HOLD_END not in fields
 

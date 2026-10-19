@@ -109,6 +109,7 @@ def _fan_control(
     humidity_target=None,
     humidity_medium=None,
     humidity_high=None,
+    held=False,
 ):
     """Build a FanControl for a single standalone fan (see FanInfo field order)."""
     return FanControl(
@@ -130,6 +131,7 @@ def _fan_control(
         humidity_target=humidity_target,
         humidity_medium=humidity_medium,
         humidity_high=humidity_high,
+        held=held,
     )
 
 
@@ -2239,19 +2241,42 @@ def test_humidity_below_restart_threshold_keeps_fan_off():
     assert cmds == []
 
 
-def test_humidity_keeps_running_fan_on_until_half_a_point():
-    """CC-30: a running fan holds until humidity is within 0.5 %RH of target."""
+def test_humidity_keeps_running_fan_on_until_two_points_below_target():
+    """CC-30: a running fan holds until humidity drops 2 %RH below its target."""
     fan_running = dict(fans=(_hum_fan(is_on=True),), room_temp=68.0)
 
-    # 50.6 > 50.5 -> humidity still wants the fan on, temperature does not.
-    cmds = compute_commands(_hum_base(**fan_running, room_humidity=_HUM_TARGET + 0.6))
-    assert cmds == []
+    # At target + 1, at the target itself and at 48.1 (> 50 - 2) humidity still
+    # wants the fan on; temperature does not.
+    for humidity in (_HUM_TARGET + 1.0, _HUM_TARGET, _HUM_TARGET - 1.9):
+        cmds = compute_commands(_hum_base(**fan_running, room_humidity=humidity))
+        assert cmds == [], humidity
 
-    # 50.5 is within the deadband -> both triggers decline, fan stops.
+    # 48.0 is the bottom of the band -> both triggers decline, fan stops.
     cmds_off = compute_commands(
-        _hum_base(**fan_running, room_humidity=_HUM_TARGET + 0.5)
+        _hum_base(**fan_running, room_humidity=_HUM_TARGET - 2.0)
     )
     assert cmds_off == [FanTurnOff("fan.tower")]
+
+
+def test_humidity_band_rides_out_integer_sensor_bounce():
+    """CC-30: a sensor bouncing 54<->57 around a 55 target no longer cycles."""
+    thresholds = dict(humidity_target=55.0, humidity_medium=60.0, humidity_high=65.0)
+
+    def run(*, is_on, room_humidity):
+        return compute_commands(
+            _base(
+                fans=(_hum_fan(is_on=is_on, **thresholds),),
+                room_temp=68.0,  # temperature inert
+                room_humidity=room_humidity,
+            )
+        )
+
+    # Off: 56 (target + 1) does not start it; 57 (target + 2) does.
+    assert run(is_on=False, room_humidity=56.0) == []
+    assert run(is_on=False, room_humidity=57.0)[0] == FanTurnOn("fan.tower")
+    # Running: 54 (target - 1) keeps it on; only 53 (target - 2) stops it.
+    assert run(is_on=True, room_humidity=54.0) == []
+    assert run(is_on=True, room_humidity=53.0) == [FanTurnOff("fan.tower")]
 
 
 def test_temperature_keeps_fan_on_when_humidity_declines():
@@ -2260,7 +2285,7 @@ def test_temperature_keeps_fan_on_when_humidity_declines():
         _hum_base(
             fans=(_hum_fan(is_on=True),),
             room_temp=72.5,  # > 72 + 0.2: temperature still wants the fan
-            room_humidity=_HUM_TARGET + 0.4,  # humidity declines
+            room_humidity=_HUM_TARGET - 2.0,  # humidity declines
         )
     )
     assert cmds == []
@@ -2272,7 +2297,7 @@ def test_humidity_keeps_fan_on_when_temperature_declines():
         _hum_base(
             fans=(_hum_fan(is_on=True),),
             room_temp=72.1,  # within the CC-27 deadband: temperature declines
-            room_humidity=_HUM_TARGET + 0.6,  # humidity still wants the fan
+            room_humidity=_HUM_TARGET - 1.0,  # humidity still wants the fan
         )
     )
     assert cmds == []
@@ -2284,7 +2309,7 @@ def test_fan_stops_only_when_both_triggers_decline():
         _hum_base(
             fans=(_hum_fan(is_on=True),),
             room_temp=72.1,
-            room_humidity=_HUM_TARGET + 0.4,
+            room_humidity=_HUM_TARGET - 2.0,
         )
     )
     assert cmds == [FanTurnOff("fan.tower")]
@@ -2338,7 +2363,7 @@ def test_running_fan_is_held_by_temperature_band_after_humidity_declines():
         _hum_base(
             fans=(_hum_fan(is_on=True),),
             room_temp=72.5,
-            room_humidity=_HUM_TARGET + 0.4,
+            room_humidity=_HUM_TARGET - 2.0,
         )
     )
     assert cmds == []
@@ -2348,7 +2373,7 @@ def test_running_fan_is_held_by_temperature_band_after_humidity_declines():
         _hum_base(
             fans=(_hum_fan(is_on=True),),
             room_temp=72.2,
-            room_humidity=_HUM_TARGET + 0.4,
+            room_humidity=_HUM_TARGET - 2.0,
         )
     )
     assert cmds_off == [FanTurnOff("fan.tower")]
@@ -2481,12 +2506,16 @@ def test_vent_fan_humidity_hysteresis():
     ) == [SwitchTurnOn("switch.vent")]
 
     vent_on = _vent(target=72.0, is_on=True, humidity_target=50.0)
-    assert (
-        compute_commands(_base(vent_fan=vent_on, room_temp=72.0, room_humidity=50.6))
-        == []
-    )
+    # Symmetric band: a running vent holds through target + 1 down to 48.1.
+    for humidity in (51.0, 50.0, 48.1):
+        assert (
+            compute_commands(
+                _base(vent_fan=vent_on, room_temp=72.0, room_humidity=humidity)
+            )
+            == []
+        ), humidity
     assert compute_commands(
-        _base(vent_fan=vent_on, room_temp=72.0, room_humidity=50.5)
+        _base(vent_fan=vent_on, room_temp=72.0, room_humidity=48.0)
     ) == [SwitchTurnOff("switch.vent")]
 
 
@@ -2505,7 +2534,7 @@ def test_vent_fan_or_semantics():
     )
     # Both decline -> turns off.
     assert compute_commands(
-        _base(vent_fan=vent_on, room_temp=72.1, room_humidity=50.0)
+        _base(vent_fan=vent_on, room_temp=72.1, room_humidity=48.0)
     ) == [SwitchTurnOff("switch.vent")]
 
 
@@ -2814,3 +2843,69 @@ def test_unheld_split_ac_unchanged():
         "Delay",
         "SetFanMode",
     ]
+
+
+# --- standalone fan manual override (CC-46) ---------------------------------
+def test_held_fan_gets_no_commands_whatever_the_triggers():
+    """CC-46: a held fan is never turned on, off, re-speeded or re-directed."""
+    presets = ("low", "medium", "high")
+    # Off, but temperature wants it on at high and reversed.
+    wants_on = _fan_control(
+        is_on=False, preset_modes=presets, reversible=True, reverse=True, held=True
+    )
+    assert compute_commands(_base(fans=(wants_on,), room_temp=80.0)) == []
+
+    # Running at high, forward, while the rules want it reversed at low ...
+    running = dict(
+        is_on=True,
+        preset_modes=presets,
+        preset_mode="high",
+        percentage=100,
+        reversible=True,
+        direction="forward",
+        reverse=True,
+        held=True,
+    )
+    assert (
+        compute_commands(_base(fans=(_fan_control(**running),), room_temp=73.0)) == []
+    )
+    # ... or want it off.
+    assert (
+        compute_commands(_base(fans=(_fan_control(**running),), room_temp=60.0)) == []
+    )
+
+    # The humidity trigger is ignored too.
+    humid = _fan_control(
+        is_on=False,
+        humidity_target=50.0,
+        humidity_medium=55.0,
+        humidity_high=60.0,
+        held=True,
+    )
+    assert (
+        compute_commands(_base(fans=(humid,), room_temp=68.0, room_humidity=90.0)) == []
+    )
+
+
+def test_held_fan_leaves_other_fans_and_vent_driven():
+    """CC-46: only the held fan is skipped; other fans and the vent still run."""
+    held = _fan_control("fan.a", is_on=False, held=True)
+    free = _fan_control("fan.b", is_on=False)
+    cmds = compute_commands(
+        _base(
+            fans=(held, free),
+            vent_fan=_vent(target=72.0, use=True),
+            room_temp=76.0,
+        )
+    )
+    assert {c.entity_id for c in cmds if not isinstance(c, Delay)} == {
+        "fan.b",
+        "switch.vent",
+    }
+
+
+def test_unheld_fan_unchanged():
+    """CC-46: held=False is the default and leaves the normal commands intact."""
+    cmds = compute_commands(_base(fans=(_fan_control(held=False),), room_temp=76.0))
+    assert cmds == compute_commands(_base(fans=(_fan_control(),), room_temp=76.0))
+    assert cmds[0] == FanTurnOn("fan.tower")

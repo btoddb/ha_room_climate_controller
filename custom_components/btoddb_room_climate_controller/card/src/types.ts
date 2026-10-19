@@ -33,6 +33,8 @@ export interface FanConfig {
   humidity_target: string;
   humidity_medium_offset: string;
   humidity_high_offset: string;
+  /** This fan's manual-override sensor (CC-46, UX-39). Empty when absent. */
+  override?: string;
 }
 
 export interface RoomClimateControlConfig extends LovelaceCardConfig {
@@ -76,7 +78,8 @@ export interface RoomClimateControlConfig extends LovelaceCardConfig {
   the shared A/C sensor. Empty when absent. */
   heater_setpoint_hold?: string;
   /** The room's "Resume control" button entity (CC-45, UX-38): pressing it
-  ends every active setpoint hold and vent fan override. Empty when absent. */
+  ends every active setpoint hold and vent/standalone fan override. Empty when
+  absent. */
   resume_control?: string;
   use_vent_fan: string;
   target_vent_fan: string;

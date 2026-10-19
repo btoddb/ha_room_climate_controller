@@ -79,6 +79,7 @@ export function resolveRoomConfig(
       humidity_target: f.humidity_target ?? "",
       humidity_medium_offset: f.humidity_medium_offset ?? "",
       humidity_high_offset: f.humidity_high_offset ?? "",
+      override: f.override ?? "",
     })),
     use_ac: cool.use ?? "",
     target_cooling: cool.target ?? "",

@@ -7,11 +7,13 @@ import {
   getEffectiveTargetLimits,
   getHumidityTargetLimits,
   getNumberLimits,
+  getStandaloneFanMode,
   getTargetTempValue,
   getVentFanMode,
   isHoldActive,
   pressButton,
   type TargetTempDevice,
+  withOverrideSuffix,
 } from "../src/helpers.ts";
 import type { HomeAssistant } from "../src/ha-types.ts";
 
@@ -266,6 +268,133 @@ describe("getVentFanMode", () => {
       "Unavailable"
     );
     assert.equal(getVentFanMode(ventHass(undefined, override), VENT, OVERRIDE), "Unavailable");
+  });
+});
+
+describe("withOverrideSuffix", () => {
+  const OVERRIDE = "sensor.fan_override";
+  const UNTIL = new Date(2026, 9, 3, 15, 42).toISOString();
+
+  function sensorHass(override?: { state: string; until?: string | null }): HomeAssistant {
+    const states: Record<string, unknown> = {};
+    if (override) {
+      states[OVERRIDE] = {
+        entity_id: OVERRIDE,
+        state: override.state,
+        attributes: { until: override.until ?? null },
+      };
+    }
+    return { states } as HomeAssistant;
+  }
+
+  it("appends the end time while the sensor reads active, on, or off", () => {
+    for (const state of ["active", "on", "off"]) {
+      const hass = sensorHass({ state, until: UNTIL });
+      assert.equal(withOverrideSuffix(hass, "50%", OVERRIDE), "50% · override until 3:42 PM");
+    }
+  });
+
+  it("returns the base for a none, unavailable, unknown, or missing sensor", () => {
+    for (const state of ["none", "unavailable", "unknown"]) {
+      const hass = sensorHass({ state, until: UNTIL });
+      assert.equal(withOverrideSuffix(hass, "50%", OVERRIDE), "50%");
+    }
+    assert.equal(withOverrideSuffix(sensorHass(), "50%", OVERRIDE), "50%");
+  });
+
+  it("returns the base when there is no override entity id", () => {
+    const hass = sensorHass({ state: "active", until: UNTIL });
+    assert.equal(withOverrideSuffix(hass, "50%"), "50%");
+    assert.equal(withOverrideSuffix(hass, "50%", ""), "50%");
+  });
+
+  it("returns the base for a null or unparseable until", () => {
+    assert.equal(
+      withOverrideSuffix(sensorHass({ state: "active", until: null }), "50%", OVERRIDE),
+      "50%"
+    );
+    assert.equal(
+      withOverrideSuffix(sensorHass({ state: "active", until: "not-a-date" }), "50%", OVERRIDE),
+      "50%"
+    );
+  });
+
+  it("never suffixes a status with no live device value", () => {
+    const hass = sensorHass({ state: "active", until: UNTIL });
+    for (const base of ["Unavailable", "Unknown", "—"]) {
+      assert.equal(withOverrideSuffix(hass, base, OVERRIDE), base);
+    }
+  });
+});
+
+describe("getStandaloneFanMode", () => {
+  const FAN = "fan.ceiling_fan";
+  const OVERRIDE = "sensor.ceiling_fan_override";
+  // 3:42 PM browser-local, serialized to a UTC ISO string like the backend's
+  // `until` attribute, so assertions hold in any test-machine timezone.
+  const UNTIL = new Date(2026, 9, 3, 15, 42).toISOString();
+
+  function fanHass(
+    fan: { state: string; attributes?: Record<string, unknown> } | undefined,
+    override?: { state: string; until?: string | null }
+  ): HomeAssistant {
+    const states: Record<string, unknown> = {};
+    if (fan) {
+      states[FAN] = { entity_id: FAN, state: fan.state, attributes: fan.attributes ?? {} };
+    }
+    if (override) {
+      states[OVERRIDE] = {
+        entity_id: OVERRIDE,
+        state: override.state,
+        attributes: { until: override.until ?? null },
+      };
+    }
+    return { states } as HomeAssistant;
+  }
+
+  const running = { state: "on", attributes: { percentage: 50 } };
+
+  it("shows the plain fan status when there is no override entity id", () => {
+    const hass = fanHass(running, { state: "active", until: UNTIL });
+    assert.equal(getStandaloneFanMode(hass, FAN), "50%");
+    assert.equal(getStandaloneFanMode(hass, FAN, false, ""), "50%");
+  });
+
+  it("appends the override end time to a running fan's speed", () => {
+    const hass = fanHass(running, { state: "active", until: UNTIL });
+    assert.equal(getStandaloneFanMode(hass, FAN, false, OVERRIDE), "50% · override until 3:42 PM");
+  });
+
+  it("appends the override end time to an off fan", () => {
+    const hass = fanHass({ state: "off" }, { state: "active", until: UNTIL });
+    assert.equal(getStandaloneFanMode(hass, FAN, false, OVERRIDE), "Off · override until 3:42 PM");
+  });
+
+  it("keeps the reversible direction suffix before the override suffix", () => {
+    const fan = { state: "on", attributes: { percentage: 50, preset_mode: "reverse" } };
+    const hass = fanHass(fan, { state: "active", until: UNTIL });
+    assert.equal(
+      getStandaloneFanMode(hass, FAN, true, OVERRIDE),
+      "50% (Reverse) · override until 3:42 PM"
+    );
+  });
+
+  it("shows the plain status for a none, unavailable, unknown, or missing sensor", () => {
+    for (const state of ["none", "unavailable", "unknown"]) {
+      const hass = fanHass(running, { state, until: UNTIL });
+      assert.equal(getStandaloneFanMode(hass, FAN, false, OVERRIDE), "50%");
+    }
+    assert.equal(getStandaloneFanMode(fanHass(running), FAN, false, OVERRIDE), "50%");
+  });
+
+  it("ignores an override with a null until", () => {
+    const hass = fanHass(running, { state: "active", until: null });
+    assert.equal(getStandaloneFanMode(hass, FAN, false, OVERRIDE), "50%");
+  });
+
+  it("stays Unavailable with no suffix when the fan is unavailable", () => {
+    const hass = fanHass({ state: "unavailable" }, { state: "active", until: UNTIL });
+    assert.equal(getStandaloneFanMode(hass, FAN, false, OVERRIDE), "Unavailable");
   });
 });
 

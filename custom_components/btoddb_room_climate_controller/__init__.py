@@ -109,7 +109,7 @@ def _loaded_entry(hass: HomeAssistant) -> RoomClimateConfigEntry | None:
 
 @callback
 def _resume_control(hass: HomeAssistant, call: ServiceCall) -> None:
-    """End a room's setpoint holds and vent override now (CC-45)."""
+    """End a room's setpoint holds, vent override and fan overrides now (CC-45)."""
     room = call.data["room"]
     entry = _loaded_entry(hass)
     controller = entry.runtime_data.controllers.get(room) if entry else None

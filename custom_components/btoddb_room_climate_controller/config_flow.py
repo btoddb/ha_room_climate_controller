@@ -488,9 +488,10 @@ class RoomSubentryFlowHandler(ConfigSubentryFlow):
             self._data.get(CONF_HAS_AC)
             or self._data.get(CONF_HAS_HEATER)
             or self._data.get(CONF_HAS_VENT_FAN)
+            or self._data.get(CONF_HAS_FAN)
         ):
-            # CC-44: also gates the vent fan override notification (CC-38), so
-            # a vent-only room needs it too.
+            # CC-44: also gates the vent fan (CC-38) and standalone fan (CC-46)
+            # override notifications, so a vent- or fan-only room needs it too.
             fields += [
                 (vol.Required(CONF_NOTIFY_ON_HOLD_END, default=True), _BOOL),
             ]

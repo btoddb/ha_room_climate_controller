@@ -21,8 +21,9 @@ a message tag):
 | `custom_components.btoddb_room_climate_controller.capabilities` | CC-L10 capability dumps |
 
 The `RCC commanded` line (CC-L7), the vent fan override lines (CC-L11), the
-setpoint hold lines (CC-L12), the resume control lines (CC-L13) and the
-diagnostic exception logs stay on the base
+setpoint hold lines (CC-L12), the resume control lines (CC-L13), the
+standalone fan override lines (CC-L14) and the diagnostic exception logs stay
+on the base
 `custom_components.btoddb_room_climate_controller.controller` logger — they're
 device-action lines, not settings/sensor/profile events. Example: to see only
 sensor activity, set `custom_components.btoddb_room_climate_controller.sensor: info`
@@ -159,8 +160,10 @@ log is emitted for those transitions.
   expired` (the override ended and normal rules take over, CC-38), `setpoint
   hold started` (a manual thermostat change started or restarted a hold,
   CC-41), `setpoint hold expired` (the hold ended and RCC re-asserts its
-  setpoint, CC-41) or `resume control` (an explicit resume via the service or
-  button, CC-45).
+  setpoint, CC-41), `fan override started` (a manual standalone fan change
+  started or restarted an override, CC-46), `fan override expired` (a fan
+  override ended and normal rules take over, CC-46) or `resume control` (an
+  explicit resume via the service or button, CC-45).
 
 Logged by `controller.py` in `_run`, at **INFO**, on the base `controller`
 logger, after the evaluation's commands have all been attempted, using the
@@ -173,7 +176,8 @@ device type the room actually has, the bare room humidity (`humidity <N>%`)
 when a reading is available, then **per standalone fan**
 (`fan <object_id> target <N>°F (med <N>°F high <N>°F)`), appending that fan's
 own humidity target/offsets (CC-28) when configured —
-` hum target <N>% (med <N>% high <N>%)` — and finally, when the room has a
+` hum target <N>% (med <N>% high <N>%)` — and ` held` while that fan is under
+a manual override (CC-46), and finally, when the room has a
 vent fan, `vent <object_id> target <N>°F`, appending its own humidity target
 (CC-37) when configured — ` hum target <N>%` — and, while a manual override
 is active (CC-38), ` override on` or ` override off` (the vent fan has no
@@ -265,18 +269,42 @@ Logged by `controller.py` (`_on_climate_change`, `_setpoint_hold_expired`,
 
 - **CC-L13** When Resume control (CC-45) runs, via the service or the room's
   button:
-  `[room=<key>] Resume control (<source>): cleared <n> setpoint hold(s), vent override <yes|no>`
-  at **INFO** when a setpoint hold or the vent fan override was active, otherwise
+  `[room=<key>] Resume control (<source>): cleared <n> setpoint hold(s), vent override <yes|no>, <m> fan override(s)`
+  at **INFO** when a setpoint hold, the vent fan override or a standalone fan
+  override was active, otherwise
   `[room=<key>] Resume control (<source>): nothing to resume` at **DEBUG**.
   `<source>` is `service` or `button`. Each hold or override it ends also logs
   the existing "cleared" line with reason `resume control (<source>)`:
   `[room=<key>] Setpoint hold cleared: <entity_id>: resume control (<source>)`
-  (CC-L12) and `[room=<key>] Vent fan override cleared: resume control
-  (<source>)` (CC-L11). The evaluation that follows uses trigger
-  `resume control` (CC-L7).
+  (CC-L12), `[room=<key>] Vent fan override cleared: resume control
+  (<source>)` (CC-L11) and `[room=<key>] Fan override cleared: <entity_id>:
+  resume control (<source>)` (CC-L14). The evaluation that follows uses
+  trigger `resume control` (CC-L7).
 
 Logged by `controller.py` (`async_resume_control`) on the base `controller`
 logger.
+
+### Standalone fan manual override (CC-L14)
+
+- **CC-L14** Each standalone fan change that CC-47 considers (an on↔off
+  transition, or a `percentage`/`preset_mode` change while on) is classified
+  and logged:
+  `[room=<key>] Fan <entity_id> <old>→<new>: <manual|user|automation|own> (context id=<id> user_id=<user_id|None> parent_id=<parent_id|None>) — <outcome>`
+  where `<old>`/`<new>` are the fan's states (`on→on` for a speed or preset
+  change). A manual change logs at **INFO** with `<outcome>` `override until
+  <HH:MM>` (HA local time) when it starts an override, `override restarted
+  until <HH:MM>` when it restarts an active one (CC-46), and `no override
+  (manual mode)` while Manual Mode is on (CC-48); `user`, `automation` and
+  `own` changes log at **DEBUG** with outcome `no override`. Transitions
+  from/to `unavailable`/`unknown`, attribute-only updates while off and
+  changes of other attributes are not logged. When an override ends:
+  `[room=<key>] Fan override expired: <entity_id>` (followed by an evaluation
+  with trigger `fan override expired`, CC-L7), or
+  `[room=<key>] Fan override cleared: <entity_id>: manual mode` when Manual
+  Mode turns on during an override (CC-48).
+
+Logged by `controller.py` (`_on_fan_change`, `_fan_override_expired`,
+`_clear_fan_overrides`) on the base `controller` logger.
 
 ### Copy/paste room settings (out of scope)
 

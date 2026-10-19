@@ -74,6 +74,10 @@ export interface WsFanEntity {
   humidity_target: string | null;
   humidity_medium_offset: string | null;
   humidity_high_offset: string | null;
+  /** This fan's manual-override sensor (state none/active, attribute `until`;
+  CC-46). Older backends omit it, so readers must treat a missing value as
+  none. */
+  override?: string | null;
 }
 
 /** Shared fan-speed offset number entities — one pair per room, not per fan. */
@@ -119,8 +123,9 @@ export interface WsRoom {
     ac_setpoint_hold: string | null;
     heater_setpoint_hold: string | null;
     /** The room's "Resume control" button (CC-45, UX-38) that ends every
-    active setpoint hold and vent fan override, or null when the room has no
-    A/C, heater or vent fan. Older backends omit it. */
+    active setpoint hold and vent/standalone fan override, or null when the
+    room has no A/C, heater, standalone fan or vent fan. Older backends omit
+    it. */
     resume_control: string | null;
     window_sensors: string[];
     /** "cooling"/"heating"/"vent_fan" — the "fan" key moved to `fans`. */

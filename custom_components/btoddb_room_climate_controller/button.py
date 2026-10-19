@@ -25,11 +25,11 @@ async def async_setup_entry(
     entry: RoomClimateConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up a Resume control button per room with a holdable device."""
+    """Set up a Resume control button per room with a holdable device or fan."""
     hub = entry.runtime_data
 
     for room in hub.rooms.values():
-        if not (room.has_ac or room.has_heater or room.has_vent_fan):
+        if not (room.has_ac or room.has_heater or room.has_vent_fan or room.has_fan):
             continue
         _LOGGER.debug("[room=%s] button: Resume control", room.key)
         async_add_entities(
@@ -38,7 +38,7 @@ async def async_setup_entry(
 
 
 class ResumeControlButton(ButtonEntity):
-    """Ends every setpoint hold and the vent override for a room (CC-45)."""
+    """Ends every setpoint hold, the vent override and fan overrides (CC-45)."""
 
     _attr_has_entity_name = True
     _attr_name = "Resume control"

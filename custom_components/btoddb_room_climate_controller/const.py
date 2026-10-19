@@ -46,6 +46,9 @@ SIGNAL_VENT_OVERRIDE: Final = f"{DOMAIN}_vent_override"
 # f"{SIGNAL_SETPOINT_HOLD}_{entry_id}_{room_key}_{role}" (role "ac"/"heater")
 # with (state, until, setpoint).
 SIGNAL_SETPOINT_HOLD: Final = f"{DOMAIN}_setpoint_hold"
+# Standalone fan manual-override status (CC-46/CC-48), sent per fan as
+# f"{SIGNAL_FAN_OVERRIDE}_{entry_id}_{room_key}_{slug}" with (state, until).
+SIGNAL_FAN_OVERRIDE: Final = f"{DOMAIN}_fan_override"
 
 # --- Device types (cooling / heating / fan / vent fan) -----------------------
 DEVICE_COOLING: Final = "cooling"
@@ -182,6 +185,12 @@ DEFAULT_HUMIDITY_HIGH_OFFSET: Final = 10
 # matching state change still counts as that command's echo.
 VENT_OVERRIDE_SECONDS: Final = 20 * 60
 VENT_ECHO_WINDOW_SECONDS: Final = 10
+# Standalone fan manual override (CC-46/CC-47): how long a manual change of a
+# standalone fan stops the controller driving it (fixed, not configurable),
+# and how long after the controller's own command to that fan any
+# context-less change still counts as that command's echo.
+FAN_OVERRIDE_SECONDS: Final = 60 * 60
+FAN_ECHO_WINDOW_SECONDS: Final = 10
 # CC-42: how long after the controller's own setpoint command a context-less
 # climate update near the commanded value still counts as that command's echo.
 SETPOINT_ECHO_WINDOW_SECONDS: Final = 10
