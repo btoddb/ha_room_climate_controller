@@ -26,9 +26,9 @@ import {
   formatSensorValue,
   getClimateHoldMode,
   getEffectiveTargetLimits,
-  getFanMode,
   getHumidityTargetLimits,
   getNumberLimits,
+  getStandaloneFanMode,
   getStateObj,
   getTargetTemp,
   getTargetTempValue,
@@ -499,7 +499,8 @@ export class RoomClimateControl extends LitElement {
     });
     // One row per fan. All fans share the room's single high offset (used only
     // for the effective-limit math), but each has its own use/target/reverse
-    // and its own humidity target + offsets (CC-28 amendment).
+    // and its own humidity target + offsets (CC-28 amendment). An active manual
+    // override (CC-46) is appended to the fan's status (UX-39).
     for (const fan of c.fans) {
       addDevice({
         label: fan.label,
@@ -508,9 +509,13 @@ export class RoomClimateControl extends LitElement {
         useToggle: fan.use,
         targetHelper: fan.target,
         highOffsetHelper: c.fan_high_offset,
-        modeFn: (hass, id) => getFanMode(hass, id, fan.reversible),
+        modeFn: (hass, id) => getStandaloneFanMode(hass, id, fan.reversible, fan.override),
         humidityTargetHelper: fan.humidity_target,
         humidityHighOffsetHelper: fan.humidity_high_offset,
+        resume: {
+          active: isHoldActive(this.hass, fan.override),
+          buttonId: c.resume_control ?? "",
+        },
       });
     }
     // Vent fan row (issue #77, UX-34): plain on/off device, own temp + humidity

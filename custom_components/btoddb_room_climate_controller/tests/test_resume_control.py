@@ -23,6 +23,7 @@ from custom_components.btoddb_room_climate_controller.controller import (
 AC = "climate.office_ac"
 HEATER = "climate.office_heater"
 VENT = "switch.office_vent"
+FAN = "fan.office_tower"
 MANUAL_MODE = f"switch.{KEY_MANUAL_MODE}"
 
 
@@ -114,15 +115,21 @@ def timers(monkeypatch):
 @pytest.fixture
 def hooks():
     """Record publishes, ``async_request_run`` and ``_notify``."""
-    return {"holds": [], "vent": [], "runs": [], "notified": []}
+    return {"holds": [], "vent": [], "fans": [], "runs": [], "notified": []}
 
 
-def _make_controller(hooks):
+def _make_controller(hooks, **room_overrides):
     hass = _StubHass({MANUAL_MODE: "off", VENT: "off"})
     entry = MagicMock()
     entry.entry_id = "entry1"
-    controller = RoomController(hass, entry, _room())
+    controller = RoomController(hass, entry, _room(**room_overrides))
     controller._resolve = lambda key, domain: f"{domain}.{key}"
+
+    def publish_fan(entity_id):
+        state = "active" if entity_id in controller._fan_overrides else "none"
+        hooks["fans"].append((entity_id, state))
+
+    controller._publish_fan_override = publish_fan
 
     def publish_hold(entity_id):
         hold = controller._setpoint_holds.get(entity_id)
@@ -182,7 +189,7 @@ def test_resume_clears_holds_and_vent_override(timers, hooks, caplog):
     messages = [r.message for r in caplog.records]
     assert (
         "[room=office] Resume control (button): cleared 1 setpoint hold(s), "
-        "vent override yes"
+        "vent override yes, 0 fan override(s)"
     ) in messages
     info = [r for r in caplog.records if "Resume control (button)" in r.message]
     assert [r.levelno for r in info] == [logging.INFO]
@@ -223,8 +230,48 @@ def test_resume_only_vent_override(timers, hooks, caplog):
     assert hooks["notified"] == []
     assert (
         "[room=office] Resume control (button): cleared 0 setpoint hold(s), "
-        "vent override yes"
+        "vent override yes, 0 fan override(s)"
     ) in [r.message for r in caplog.records]
+
+
+def test_resume_clears_fan_overrides(timers, hooks, caplog):
+    """CC-45/CC-48/CC-L13: resume ends every fan override, silently, and re-runs."""
+    other = "fan.office_ceiling"
+    controller = _make_controller(
+        hooks,
+        has_ac=False,
+        has_heater=False,
+        ac_climate=None,
+        heater_climate=None,
+        has_vent_fan=False,
+        vent_fan_entity=None,
+        has_fan=True,
+        fan_entities=(FAN, other),
+    )
+    controller._start_fan_override(FAN)
+    controller._start_fan_override(other)
+    cancels = [t[2] for t in timers]
+    assert len(cancels) == 2
+    _reset(hooks)
+
+    with caplog.at_level(logging.INFO, logger=ctrl_mod.__name__):
+        assert controller.async_resume_control("service") is True
+
+    for cancel in cancels:
+        cancel.assert_called_once()
+    assert controller._fan_overrides == {}
+    assert controller._unsub_fan_timers == {}
+    assert hooks["fans"] == [(FAN, "none"), (other, "none")]
+    assert hooks["runs"] == ["resume control"]
+    assert hooks["notified"] == []
+    messages = [r.message for r in caplog.records]
+    assert (
+        "[room=office] Resume control (service): cleared 0 setpoint hold(s), "
+        "vent override no, 2 fan override(s)"
+    ) in messages
+    assert f"[room=office] Fan override cleared: {FAN}: resume control (service)" in (
+        messages
+    )
 
 
 def test_resume_leaves_manual_mode_alone(timers, hooks):

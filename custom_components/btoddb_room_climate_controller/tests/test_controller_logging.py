@@ -14,6 +14,7 @@ import importlib.util
 import pathlib
 import sys
 import types
+from dataclasses import replace
 
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 
@@ -155,7 +156,7 @@ def test_room_from_subentry_parses_setpoint_hold_settings():
 
 
 def test_describe_room_settings_includes_hold_settings():
-    """CC-L5: hold minutes for A/C or heater rooms; notify also for vent rooms."""
+    """CC-L5: hold minutes for A/C or heater rooms; notify also for vent/fan rooms."""
     described = models.describe_room_settings(
         _room(setpoint_hold_minutes=30, notify_on_hold_end=False)
     )
@@ -164,7 +165,13 @@ def test_describe_room_settings_includes_hold_settings():
 
     fan_only = models.describe_room_settings(_room(has_ac=False, ac_climate=None))
     assert "setpoint_hold_minutes" not in fan_only
-    assert "notify_on_hold_end" not in fan_only
+    assert "notify_on_hold_end=True" in fan_only
+
+    bare = models.describe_room_settings(
+        _room(has_ac=False, ac_climate=None, has_fan=False, fan_entities=())
+    )
+    assert "setpoint_hold_minutes" not in bare
+    assert "notify_on_hold_end" not in bare
 
     vent_only = models.describe_room_settings(
         _room(
@@ -323,6 +330,15 @@ def test_threshold_context_includes_vent_override():
         )
         context = _threshold_context(room, inputs)
         assert f"vent office_vent target 72°F hum target 60% {suffix}" in context
+
+
+def test_threshold_context_marks_held_fan():
+    """CC-L7/CC-46: a fan under a manual override is suffixed `` held``."""
+    room = _room(has_ac=True, has_heater=False, has_fan=True)
+    fan = _inputs().fans[0]
+    held = _threshold_context(room, _inputs(fans=(replace(fan, held=True),)))
+    assert "fan office target 72°F (med 75°F high 78°F) held" in held
+    assert " held" not in _threshold_context(room, _inputs())
 
 
 def test_device_label_maps_vent_fan_entity():

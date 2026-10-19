@@ -19,7 +19,7 @@ from custom_components.btoddb_room_climate_controller.const import (
 from custom_components.btoddb_room_climate_controller.models import room_uid
 
 
-def _room(key, *, has_ac=False, has_heater=False, has_vent_fan=False):
+def _room(key, *, has_ac=False, has_heater=False, has_vent_fan=False, has_fan=False):
     return SimpleNamespace(
         room_id=f"sub_{key}",
         key=key,
@@ -27,6 +27,7 @@ def _room(key, *, has_ac=False, has_heater=False, has_vent_fan=False):
         has_ac=has_ac,
         has_heater=has_heater,
         has_vent_fan=has_vent_fan,
+        has_fan=has_fan,
     )
 
 
@@ -76,12 +77,13 @@ def test_button_identity():
 
 
 def test_setup_creates_buttons_only_for_holdable_rooms():
-    """CC-45: A/C, heater and vent rooms get a button; a fan-only room doesn't."""
+    """CC-45: A/C, heater, vent and fan rooms get a button; a bare room doesn't."""
     rooms = [
         _room("ac_room", has_ac=True),
         _room("heat_room", has_heater=True),
         _room("vent_room", has_vent_fan=True),
-        _room("fan_room"),
+        _room("fan_room", has_fan=True),
+        _room("bare_room"),
     ]
     added: list[tuple[list, dict]] = []
 
@@ -94,6 +96,7 @@ def test_setup_creates_buttons_only_for_holdable_rooms():
         ("ac_room", {"config_subentry_id": "sub_ac_room"}),
         ("heat_room", {"config_subentry_id": "sub_heat_room"}),
         ("vent_room", {"config_subentry_id": "sub_vent_room"}),
+        ("fan_room", {"config_subentry_id": "sub_fan_room"}),
     ]
     assert all(len(entities) == 1 for entities, _kw in added)
     assert all(

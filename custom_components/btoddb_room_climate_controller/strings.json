@@ -70,7 +70,7 @@
             "heater_fan_only_override": "Allow heater fan-only circulation",
             "heater_setpoint_offset": "Heater setpoint offset (°F, optional, default 2)",
             "setpoint_hold_minutes": "Thermostat hold after a manual setpoint change (minutes, optional, default 60)",
-            "notify_on_hold_end": "Notify when a thermostat hold or vent fan override ends",
+            "notify_on_hold_end": "Notify when a thermostat hold or a vent fan or fan override ends",
             "fan_entities": "Fans",
             "vent_fan_entity": "Vent fan"
           },
@@ -140,7 +140,7 @@
     },
     "resume_control": {
       "name": "Resume control",
-      "description": "End any active thermostat setpoint hold or vent fan override in a room and resume automatic control immediately. No notification is sent.",
+      "description": "End any active thermostat setpoint hold, vent fan override or fan override in a room and resume automatic control immediately. No notification is sent.",
       "fields": {
         "room": {
           "name": "Room",

@@ -1,10 +1,11 @@
 """
 Hold-ended notifications via the companion ``btoddb_notifications`` integration.
 
-Sent when a thermostat setpoint hold (CC-41) or a vent fan override (CC-38)
-times out and the controller resumes driving the device (CC-44). Best-effort:
-a missing service is warned about once per process and skipped, and a failing
-call is logged — neither ever raises into the controller.
+Sent when a thermostat setpoint hold (CC-41), a vent fan override (CC-38) or a
+standalone fan override (CC-46) times out and the controller resumes driving
+the device (CC-44). Best-effort: a missing service is warned about once per
+process and skipped, and a failing call is logged — neither ever raises into
+the controller.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ async def async_send_hold_ended(
     hass: HomeAssistant, room: Room, device: str, message: str
 ) -> None:
     """
-    Notify that a hold on ``device`` ("ac"/"heater"/"vent_fan") has ended.
+    Notify that a hold on ``device`` ("ac"/"heater"/"vent_fan"/"fan_<slug>") ended.
 
     Never raises (CC-44). The ``tag`` is stable per room and device so a newer
     notification replaces an older one for the same device.

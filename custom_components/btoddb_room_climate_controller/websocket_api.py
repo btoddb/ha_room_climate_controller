@@ -61,6 +61,7 @@ from .models import (
     fan_humidity_high_key,
     fan_humidity_medium_key,
     fan_humidity_target_key,
+    fan_override_key,
     fan_reverse_key,
     fan_slug,
     fan_target_key,
@@ -178,6 +179,9 @@ def _serialize_room(
                 if room.humidity_sensor
                 else None
             ),
+            # Manual-override status sensor (CC-48): none/active with an ISO
+            # `until` attribute.
+            "override": rr(fan_override_key(slug), "sensor"),
         }
         for fan_eid in room.fan_entities
     ]
@@ -236,11 +240,11 @@ def _serialize_room(
                 else None
             ),
             # Per-room "Resume control" button (CC-45): ends every setpoint
-            # hold and the vent override at once; null without an A/C, heater
-            # or vent fan.
+            # hold, the vent override and every fan override at once; null
+            # without an A/C, heater, vent fan or standalone fan.
             "resume_control": (
                 rr(KEY_RESUME_CONTROL, "button")
-                if room.has_ac or room.has_heater or room.has_vent_fan
+                if room.has_ac or room.has_heater or room.has_vent_fan or room.has_fan
                 else None
             ),
             # Per-fan live entities (each fan has its own target/use/reverse/

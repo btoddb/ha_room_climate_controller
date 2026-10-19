@@ -190,22 +190,47 @@ export function getOnOffMode(hass: HomeAssistant, entityId: string): string {
   return state.state === "on" ? "On" : "Off";
 }
 
-/** Vent fan status (UX-34): plain On/Off, plus `· override until <h:mm AM/PM>`
-(browser-local time) while the manual override sensor (CC-38) reads on/off with
-a valid `until` timestamp (UX-36). A missing/unavailable/unknown sensor or a
-"none" state reads as no override; an unavailable vent fan stays "Unavailable". */
+/** Append `· override until <h:mm AM/PM>` (browser-local time) to a device
+row's status while its manual-override sensor reports an override in effect
+(per `isHoldActive`: the vent override's on/off, CC-38, or a standalone fan
+override's "active", CC-46) with a valid `until` timestamp. A missing/empty id,
+a missing/unavailable/unknown sensor or a "none" state reads as no override,
+and a status with no live device value ("Unavailable"/"Unknown"/"—") is
+returned as-is. Shared by the vent row (UX-36) and the standalone fan rows
+(UX-39). */
+export function withOverrideSuffix(
+  hass: HomeAssistant,
+  base: string,
+  overrideEntityId?: string
+): string {
+  if (base === "Unavailable" || base === "Unknown" || base === "—") return base;
+  if (!isHoldActive(hass, overrideEntityId)) return base;
+  const t = formatUntilTime(hass.states[overrideEntityId!].attributes.until);
+  if (t === undefined) return base;
+  return `${base} · override until ${t}`;
+}
+
+/** Vent fan status (UX-34): plain On/Off, extended by `withOverrideSuffix`
+while the manual override (CC-38) is active (UX-36); an unavailable vent fan
+stays "Unavailable". */
 export function getVentFanMode(
   hass: HomeAssistant,
   entityId: string,
   overrideEntityId?: string
 ): string {
-  const base = getOnOffMode(hass, entityId);
-  if (base === "Unavailable" || !entityConfigured(overrideEntityId)) return base;
-  const override = hass.states[overrideEntityId!];
-  if (!override || (override.state !== "on" && override.state !== "off")) return base;
-  const t = formatUntilTime(override.attributes.until);
-  if (t === undefined) return base;
-  return `${base} · override until ${t}`;
+  return withOverrideSuffix(hass, getOnOffMode(hass, entityId), overrideEntityId);
+}
+
+/** Standalone fan status (UX-5, UX-29), extended by `withOverrideSuffix` while
+the fan's manual override (CC-46) is active (UX-39); an unavailable fan gets no
+suffix. */
+export function getStandaloneFanMode(
+  hass: HomeAssistant,
+  entityId: string,
+  fanReversible = false,
+  overrideEntityId?: string
+): string {
+  return withOverrideSuffix(hass, getFanMode(hass, entityId, fanReversible), overrideEntityId);
 }
 
 /** Format a backend `until` ISO timestamp as browser-local `h:mm AM/PM` for the
@@ -219,8 +244,8 @@ export function formatUntilTime(until: unknown): string | undefined {
 }
 
 /** True while a hold/override sensor reports one in effect: a setpoint-hold
-sensor (CC-41) reading "active" or a vent fan override sensor (CC-38) reading
-"on"/"off". Missing/empty ids, missing entities, "none", unavailable, unknown,
+sensor (CC-41) or standalone fan override sensor (CC-46) reading "active", or a
+vent fan override sensor (CC-38) reading "on"/"off". Missing/empty ids, missing entities, "none", unavailable, unknown,
 and anything else read as no hold. Gates the row's Resume button (UX-38). */
 export function isHoldActive(hass: HomeAssistant, sensorId?: string): boolean {
   if (!entityConfigured(sensorId)) return false;
@@ -229,7 +254,8 @@ export function isHoldActive(hass: HomeAssistant, sensorId?: string): boolean {
 }
 
 /** Press a `button.*` entity, e.g. the room's "Resume control" button that
-ends every active setpoint hold and vent fan override (CC-45, UX-38). */
+ends every active setpoint hold and vent/standalone fan override (CC-45,
+UX-38). */
 export function pressButton(hass: HomeAssistant, entityId: string): void {
   void hass.callService("button", "press", { entity_id: entityId });
 }
