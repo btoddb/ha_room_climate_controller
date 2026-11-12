@@ -42,7 +42,7 @@
     },
     "remoteUser": "vscode",
     "features": {
-        "ghcr.io/devcontainers/features/node:2.1.1": {
+        "ghcr.io/devcontainers/features/node:2.1.2": {
             "version": "lts"
         },
         "ghcr.io/devcontainers/features/python:1": {
